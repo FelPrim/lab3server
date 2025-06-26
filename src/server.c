@@ -760,6 +760,7 @@ inline static int handle_calljoin_client(Connection *c){
                 
             struct CallFullInfo info = {
                 .command = CALLJOINSERVER,
+                .joiner_fd = htonl((uint32_t) c->client_fd),
                 .participants_count = htonl((uint32_t) call->count)
             };
             memcpy(info.callname, callname, CALL_NAME_SZ);

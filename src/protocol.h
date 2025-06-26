@@ -66,6 +66,7 @@ MessageStruct(CallFullInfo,
     char command;
     char callname[CALL_NAME_SZ];
     char sym_key[SYMM_KEY_LEN];
+    int joiner_fd;
     char participants_count;
     int participants[255];
 );
