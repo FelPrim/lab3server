@@ -48,11 +48,10 @@ inline static int change_flags(int fd, int *old_flags, int new_flags){
 }
 
 inline static int NB_SSL_accept(SSL *ssl, int fd, int *flags){
-    putchar('<');
     int ret = SSL_accept(ssl);
-    putchar('>');
     if (ret == 1){
         change_flags(fd, flags, RECVING);
+        puts("Connected successfully");
         return IS_COMPLETED;
     }
     int err = SSL_get_error(ssl, ret);
