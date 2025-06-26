@@ -17,11 +17,11 @@
 #include <sys/eventfd.h>
 
 #include <signal.h>
-#include <pthread.h>
+//#include <pthread.h>
 
 // deps
-#include <sqlite3.h>
-#include <sodium.h>
+// #include <sqlite3.h>
+// #include <sodium.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include "uthash.h"
@@ -106,8 +106,8 @@ struct Buffer{
     // bool reading_data = expected_end != 0
 };
 
-
-int Buffer_construct(struct Buffer* self){
+// TODO добавить везде где можно static inline
+static inline int Buffer_construct(struct Buffer* self){
     /*self->mem = malloc(BASIC_SZ);
     if (!self->mem){
         perror("malloc");
@@ -367,7 +367,7 @@ struct User{
 
 // TODO change type
 //typedef int Task; // не int
-
+/*
 typedef struct Task{
     unsigned int size;
     unsigned short id; // id относится к таблице
@@ -379,6 +379,7 @@ typedef struct Task{
 
 // Удаляется самый старый элемент -> очередь 
 // Потенциально неограниченное число элементов -> данные на куче
+//  TODO обмозговать, можно ли хранить на стеке. Нужно ли хранить на стеке?
 struct Queue {
     void* mem; // указатель на память, выделенную под очередь
     uint32_t size; // число, по которому можно понять размер выделенной памяти. Я возьму для этого максимальное число элементов
@@ -523,10 +524,11 @@ int QueueTS_wait_and_get(struct QueueTS* self, Task* result){
 
 // работает на одном потоке
 struct Worker{
-    struct QueueTS submission_queue;
-    struct QueueTS completion_queue;
+    struct QueueTS submission_queue; // I
+    struct QueueTS completion_queue; // O
 
-    sqlite3 *db;
+    // Текущая версия не подразумевает хранение данных в бд
+//    sqlite3 *db;
 };
 
 typedef struct Result{
@@ -620,6 +622,7 @@ int Worker_construct(struct Worker* self, int *epfd, int *event_fd){
         QueueTS_destruct(&self->completion_queue);
         return result;
     }
+    /*
     result = sqlite3_open("data.db", &self->db);
     if (unlikely(result != SQLITE_OK)){
         perror("data.db open");
@@ -660,18 +663,19 @@ int Worker_construct(struct Worker* self, int *epfd, int *event_fd){
         QueueTS_destruct(&self->completion_queue);
         return result;
     }
-
+*/
+ /*   // нужно для оповещения основного потока о том, что в completion_queue появился новый Result
     *event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (*event_fd == -1) { 
         perror("eventfd"); 
-        sqlite3_close(self->db);
+  //      sqlite3_close(self->db);
         exit(1); 
     }
 
     struct epoll_event ev = { .events = EPOLLIN, .data = { .fd = event_fd } };
     if (epoll_ctl(*epfd, EPOLL_CTL_ADD, *event_fd, &ev) == -1) {
         perror("epoll_ctl add eventfd");
-        sqlite3_close(self->db);
+    //    sqlite3_close(self->db);
         exit(1);
     }
 
@@ -687,16 +691,20 @@ int Worker_destruct(struct Worker* self){
     if (unlikely(result2)){
         perror("QueueTS_destruct(submission_queue)");
     }
+    /*
     result |= result2;
     result2 = sqlite3_close(self->db);
     if (unlikely(result2 != SQLITE_OK)){
         perror("sqlite3_close(db)");
-    }
+    }*//*
     return result | result2;
 }
 
+#define TASKPAYLOAD_SZ 1024
+// TODO обмозговать размер
+// Хранить его полностью на стеке
 typedef struct Task{
-    void* payload;
+    char payload[TASKPAYLOAD_SZ];
     unsigned int size;
     unsigned short id; // id относится к таблице
     unsigned char command; // всё равно sizeof(Task) = 16
@@ -714,12 +722,17 @@ typedef struct Task{
 // Из-за Authentication хз какой размер дополнительной информации - поэтому дополнительная информация пусть будет указателем на реальную дополнительную информацию.
 // Пусть логин будет не больше 256 байт. + байт на длину логина. Также в 1 бите хранится информация о том, используется только ASCII или всё-таки используется Unicode
 // Аналогично с паролем
+// 
+// TODO Аналогично с Task
+#define RESULTPAYLOAD_SZ 1024
+
 typedef struct Result{
-    void* payload; // size от 0 до 2^24-1
+    char payload[RESULTPAYLOAD_SZ]; // size от 0 до 2^24-1
     int id; // id относится к клиенту
     unsigned int command_and_size;
 } Result;
 
+/*
 int post_login(const char* login, const char* password, sqlite3* db){
     char hash[crypto_pwhash_STRBYTES];
     int status = crypto_pwhash_str(
@@ -831,6 +844,7 @@ int delete_friend_request(int sender, int reciever, sqlite3 *bd){}
 
 int post_friendship(int friend1, int friend2, sqlite3 *bd){}
 int delete_friendship(int friend1, int friend2, sqlite3 *bd){}
+*/
 /*
 void do_task(Task task, struct Queue *task_queue, struct Queue *result_queue){
     switch (((int) (task.id) << 8)+task.command){
@@ -884,6 +898,8 @@ void do_task(Task task, struct Queue *task_queue, struct Queue *result_queue){
     }
 }
 */
+// TODO ORLY???
+/*
 void* Worker_mainloop(void* args){
     assert(args);
     struct Worker* self = (struct Worker *)args;
@@ -904,8 +920,7 @@ struct Queue task_queue;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  queue_cond  = PTHREAD_COND_INITIALIZER;
 
-
-
+// TODO Это 100% не то, что нужно
 void* db_thread_fn(void* args){
     assert(task_queue.mem);
     while(1){
@@ -927,7 +942,8 @@ void* db_thread_fn(void* args){
         do_task(task);
     }
 }
-
+// TODO скорее всего нужно просто удалить
+/*
 int enqueue_task(Task task){
     pthread_mutex_lock(&queue_mutex);
     int status = Queue_append(&task_queue, task);
@@ -935,9 +951,17 @@ int enqueue_task(Task task){
     pthread_mutex_unlock(&queue_mutex);
     return status;
 }
-
+*/
 //////////////////////////////////////////////////
 // LOGIC
+*/
+// TODO
+// эта структура хранит информацию, которая используется в main
+struct MainInfo{
+	
+};
+
+// TODO добавить названия для процедур до начала цикла. Типа SSL_init, Socket_init и тд
 
 int main(){
     srand((unsigned int)time(NULL));
@@ -958,14 +982,15 @@ int main(){
     // игнорирую сигнал связанный с записью в закрытый другой стороной сокет
     // signal(SIGPIPE, SIG_IGN);
     
-
+	/*
     if (sodium_init() < 0) {
         perror("sodium");
         exit(EXIT_FAILURE);
     }
+    */
 
 
-
+// TODO наверное, goto стоит заменить на функцию...
     SERVER_START:
     stop_requested = false;
     reload_requested = false;
@@ -1024,6 +1049,7 @@ int main(){
     }
     }
     // epoll дескриптор - управляет обновлениями состояний, указанных с помощью epoll_ctl(... EPOLL_CTL_ADD ...) дескрипторов
+    // нужно для асинхронности
     int epfd = epoll_create1(0);
     if (epfd == -1){
     	perror("epoll_create1");
@@ -1081,12 +1107,16 @@ int main(){
 	    	int fd = events[i].data.fd;
 		    /*
 		    * как-то поумнее
+		    * likely на UDP-пакет, все варианты:
+		    * tfd - подсоединение нового клиента. Нужен хендшейк и переход к шифрованному общению
+		    * ufd - получение UDP-пакета. Нужного отправить другим челам из этой же конфы
+		    * clienf_fd[i] - обновление информации о том, что делает клиент. Например, отправил запрос на подсоединение к конференции
 		    * */
-		    if (fd == tfd){
-			    // Думаем
-		    }
-		    else if (fd == ufd){
+		    if (likely(fd == ufd)){
 		    	// Пересылаем
+		    }
+		    else if (fd == tfd){
+			    // Думаем
 		    }
 		    else {
 		    	// fd = client_fd
