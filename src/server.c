@@ -933,6 +933,9 @@ inline static int handle_udp_packet(){
         perror("recvfrom(ufd)");
         return -1;
     }
+    buf[r] = '\0';
+    puts(buf);
+    return 0;
 
     // Минимальная длина: 7 байт callname + 4 байта sender descriptor
     const size_t MIN_HDR = 7 + 4;
