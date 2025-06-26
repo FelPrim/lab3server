@@ -48,7 +48,9 @@ inline static int change_flags(int fd, int *old_flags, int new_flags){
 }
 
 inline static int NB_SSL_accept(SSL *ssl, int fd, int *flags){
+    putchar('<');
     int ret = SSL_accept(ssl);
+    putchar('>');
     if (ret == 1){
         change_flags(fd, flags, RECVING);
         return IS_COMPLETED;
@@ -121,8 +123,10 @@ inline static int NB_SSL_read(SSL *ssl, int fd, int *flags, struct NBSSL_Buffer 
     if (ret > 0){
         buf->seek += ret;
         if (buf->seek >= buf->seekend){
+            buf->data[buf->seek]='\0';
             buf->seekend = buf->seek;
             buf->seek = 0;
+            printf("RECVD: %s\n", buf->data);
             return IS_COMPLETED;
         }
         return ISNT_COMPLETED;

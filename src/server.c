@@ -1019,7 +1019,7 @@ inline static int handle_listen(){
             return 1;
         perror("accept");
         return -1;
-    }
+    } 
 
     int one = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
