@@ -525,7 +525,7 @@ inline static int handle_callleave_server(Connection *c){
         {
             c->status = DOING_NOTHING;
             sslbuf_clean(buf);
-            break;handle_udp_packet
+            break;
         }
         case ISNT_COMPLETED:
         {
@@ -935,7 +935,7 @@ inline static int handle_udp_packet(){
     }
     buf[r] = '\n';
     buf[r+1] = '\0';
-    sendto(ufd, buf, r+1, 0,(struct sockaddr*)&src_addr, addrlen  );
+    sendto(ufd, buf, r+1, 0,(struct sockaddr*)&src_addr, addrlen );
     return 0;
 
     // Минимальная длина: 7 байт callname + 4 байта sender descriptor
