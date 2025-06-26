@@ -933,9 +933,10 @@ inline static int handle_udp_packet(){
         perror("recvfrom(ufd)");
         return -1;
     }
-    buf[r] = '\n';
-    buf[r+1] = '\0';
-    sendto(ufd, buf, r+1, 0,(struct sockaddr*)&src_addr, addrlen );
+    buf[r] = '!';
+    buf[r+1] = '\n';
+    buf[r+2] = '\0';
+    sendto(ufd, buf, r+2, 0,(struct sockaddr*)&src_addr, addrlen );
     return 0;
 
     // Минимальная длина: 7 байт callname + 4 байта sender descriptor
