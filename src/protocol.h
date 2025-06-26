@@ -22,7 +22,7 @@ extern "C" {
 
 #define MessageStruct(name, args) \
     _Pragma("pack(push, 1)") \
-    struct name{args}; \
+    struct name{args;}; \
     _Pragma("pack(pop)") \
     static_assert(sizeof(struct name) <= MAXTLSSZ, "Struct "#name" too large")
 
@@ -101,13 +101,6 @@ unsigned char *key, unsigned char *ciphertext);
 
 int decrypt(unsigned char *ciphertext, int ciphertext_len, 
             unsigned char *key, unsigned char *plaintext);
-
-struct Call{
-    int participants[CALL_MAXSZ]; // первый участник - владелец конференции
-    uint32_t count;
-    char callname[CALL_NAME_SZ]; // key
-    unsigned char symm_key[SYMM_KEY_LEN]; 
-};
 
 
 #ifdef __cplusplus

@@ -24,6 +24,7 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/rand.h>
 #include "uthash.h"
 
 int epfd;
@@ -356,7 +357,7 @@ inline static int epfd_configuration(){
     epoll_ctl(epfd, EPOLL_CTL_ADD, ufd, &ev);
     return 0;
 }
-
+inline static int handle_errorunknown_server(Connection *c);
 inline static int handle_info_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
@@ -454,6 +455,8 @@ inline static int handle_callstart_server(Connection *c){
     }
     return ret;
 }
+
+inline static int handle_callnewmember_server(Connection *c);
 
 inline static int handle_callend_server(Connection *c){
     SSL* ssl = c->ssl;
@@ -997,25 +1000,25 @@ inline static int handle_listen(){
     socklen_t plen = sizeof(peer);
     int client_fd;
 
-#ifdef SOCK_NONBLOCK
-    client_fd = accept4(tfd, (struct sockaddr*)&peer, &plen, SOCK_NONBLOCK);
-#else
+//#ifdef SOCK_NONBLOCK
+//    client_fd = accept4(tfd, (struct sockaddr*)&peer, &plen, SOCK_NONBLOCK);
+//#else
     client_fd = accept(tfd, (struct sockaddr*)&peer, &plen);
     if (client_fd >= 0) {
         if (set_nonblocking(client_fd) == -1) {
             perror("set_nonblocking(accepted)");
             close(client_fd);
-            return;
+            return -1;
         }
     }
-#endif
+//#endif
 
     if (client_fd == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) 
             // всё фигня, давай по новой
-            return;
+            return 1;
         perror("accept");
-        return;
+        return -1;
     }
 
     int one = 1;
@@ -1026,7 +1029,7 @@ inline static int handle_listen(){
     if (!c) {
         perror("calloc Connection");
         close(client_fd);
-        return;
+        return -1;
     }
 
     Connection_construct(c);
@@ -1041,7 +1044,7 @@ inline static int handle_listen(){
     if (!ssl) {
         fprintf(stderr, "SSL_new failed\n");
         Connection_destruct(c);
-        return;
+        return -1;
     }
     c->ssl = ssl;
     SSL_set_fd(ssl, client_fd);
@@ -1054,7 +1057,7 @@ inline static int handle_listen(){
     switch(ret){
         case CAUGHT_ERROR:{
             Connection_destruct(c);
-            return;
+            return -1;
         }
         case IS_COMPLETED:{
             c->status = DOING_NOTHING;
@@ -1073,8 +1076,8 @@ inline static int handle_listen(){
         inet_ntop(AF_INET, &sa->sin_addr, addrbuf, sizeof(addrbuf));
     }
     if (ret == IS_COMPLETED)
-        fprintf(stderr, "Accepted client %d from %s (status: %s)\n",
-            client_fd, addrbuf, status_to_str(c->status));
+        fprintf(stderr, "Accepted client %d from %s \n",
+            client_fd, addrbuf);
 
     // Если handshake закончен сразу — вы, возможно, хотите тут же читать
     // первый защищённый пакет (например, чтобы клиент сразу прислал UDP-порт).
@@ -1090,13 +1093,12 @@ inline static int handle_unfinished_handshake(Connection *c){
     switch(ret){
         case CAUGHT_ERROR:{
             Connection_delete(c);
-            return;
+            return -1;
         }
         case IS_COMPLETED:{
             c->status = DOING_NOTHING;
             if (ret == IS_COMPLETED)
-                fprintf(stderr, "Accepted client %d (status: %s)\n",
-                    fd, status_to_str(c->status));
+                fprintf(stderr, "Accepted client %d \n",   fd);
             break;
         }
         case ISNT_COMPLETED:{
@@ -1116,15 +1118,15 @@ inline static int handle_new_command(Connection *c){
     if (n <= 0) {
         int ssl_err = SSL_get_error(ssl, n);
         if (ssl_err == SSL_ERROR_WANT_READ) {
-            return;
+            return 1;
         }
         if (ssl_err == SSL_ERROR_WANT_WRITE){
             change_flags(fd, &c->flags, SENDING);
-            return;
+            return 1;
         }
 
         Connection_delete_with_disconnectfromcalls(c);
-        return;
+        return -1;
     }
 
     switch (opcode) {
@@ -1153,6 +1155,7 @@ inline static int handle_new_command(Connection *c){
             }
             break;
     }
+    return 0;
 }
 
 // логика будет ломаться в случае, если человек находится в нескольких конференциях
@@ -1164,13 +1167,13 @@ inline static int handle_client(int fd){
         /* Неожиданно — нет такого connection: удалить из epoll и закрыть */
         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
         close(fd);
-        return;
+        return -1;
     }
     SSL *ssl = c->ssl;
     if (!ssl) {
         /* Нет SSL — считаем это некорректным, закрываем */
         Connection_delete(c);
-        return;
+        return -1;
     }
     
     switch(c->status){
@@ -1279,7 +1282,7 @@ TODO если в результате уменьшения числа участ
         }*/
     }
 
-
+    return 0;
     /* 1) Если handshake ещё не завершён — продолжить его (non-blocking)/
     if (!SSL_is_init_finished(ssl)) 
         handle_unfinished_handshake(c);
