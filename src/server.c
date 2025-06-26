@@ -382,7 +382,10 @@ inline static int handle_info_client(Connection *c){
             
         }
         case IS_COMPLETED:{
-            c->status = DOING_NOTHING;
+            int udpport = 0;
+            sslbuf_read(buf, &udpport, sizeof(int));
+            udpport = ntohl(udpport);
+            c->udp_addr.sin_port=udpport;
             break;
         }
         case ISNT_COMPLETED:{
@@ -913,8 +916,78 @@ inline static int handle_errorunknown_client(Connection *c){
 }
 
 inline static int handle_udp_packet(){
+    // Буфер для приёма UDP (макс. безопасный размер для UDP)
+    unsigned char buf[65536];
+    struct sockaddr_in src_addr;
+    socklen_t addrlen = sizeof(src_addr);
 
+    ssize_t r = recvfrom(ufd, buf, sizeof(buf), 0, (struct sockaddr*)&src_addr, &addrlen);
+    if (r <= 0) {
+        if (r == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return 0;
+        }
+        perror("recvfrom(ufd)");
+        return -1;
+    }
 
+    // Минимальная длина: 7 байт callname + 4 байта sender descriptor
+    const size_t MIN_HDR = 7 + 4;
+    if ((size_t)r < MIN_HDR) {
+        fprintf(stderr, "udp packet too small: %zd bytes\n", r);
+        return 0;
+    }
+
+    // Сформировать нуль-терминированный callname в размере CALL_NAME_SZ
+    char callname[CALL_NAME_SZ];
+    size_t copy_len = (CALL_NAME_SZ > 7) ? 7 : (CALL_NAME_SZ - 1);
+    memset(callname, 0, sizeof(callname));
+    memcpy(callname, buf, copy_len);
+    callname[copy_len] = '\0';
+
+    // Прочитать дескриптор отправителя (4 байта, сетевой порядок)
+    uint32_t sender_net;
+    memcpy(&sender_net, buf + 7, sizeof(sender_net));
+    uint32_t sender_fd = ntohl(sender_net);
+
+    // Найти конференцию
+    Call* call = Call_find(callname);
+    if (!call) {
+        // Не найдена конференция — можно логировать и выйти
+        // (возможно полезно отправить кому-то уведомление, но по заданию — просто не пересылать)
+        fprintf(stderr, "udp: call '%s' not found (from fd %u)\n", callname, sender_fd);
+        return 0;
+    }
+
+    // Переслать исходный пакет всем участникам, у которых дескриптор != sender_fd
+    for (uint32_t i = 0; i < call->count; ++i){
+        int participant_fd = call->participants[i];
+        if ((uint32_t)participant_fd == sender_fd)
+            continue;
+
+        Connection* conn = Connection_find(participant_fd);
+        if (!conn) {
+            // участник оффлайн/не найден - пропустить
+            continue;
+        }
+
+        // Убедимся, что у участника известен UDP-адрес/порт
+        // Если порт == 0 — адрес, возможно, не был установлен; пропускаем
+        if (conn->udp_addr.sin_port == 0){
+            // не известен UDP порт для этого участника
+            continue;
+        }
+
+        ssize_t s = sendto(ufd, buf, (size_t)r, 0,
+                           (struct sockaddr*)&conn->udp_addr, sizeof(conn->udp_addr));
+        if (s == -1) {
+            // логируем ошибку, но продолжаем
+            perror("sendto(ufd)");
+        } else if (s != r) {
+            fprintf(stderr, "udp: partial sendto to fd %d (%zd/%zd)\n", participant_fd, s, r);
+        }
+    }
+
+    return 0;
 }
 
 inline static int handle_listen(){
