@@ -50,6 +50,13 @@ void calling_stop(int signo){
 
 //////////////////////////////////////////////////
 // INTERNET
+inline static int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return -1;
+    return 0;
+}
+
 
 inline static int socket_configure(int *sock_fd, struct addrinfo *result){
     struct addrinfo *p;
@@ -72,28 +79,13 @@ inline static int socket_configure(int *sock_fd, struct addrinfo *result){
 		break;
     }
 	
-	freeaddrinfo(result);		
-	int flags = fcntl(*sock_fd, F_GETFL, 0);
-	if (flags < 0){
-		perror("fcntl_getfl");
-		oresult = -4;
-		goto sc_end;
-	}
-	if (fcntl(*sock_fd, F_SETFL, flags | O_NONBLOCK) < 0){
-		perror("fcntl_setfl");
-		oresult = -5;
-		goto sc_end;
-	}
+	freeaddrinfo(result);	
+    if (set_nonblocking(*sock_fd))
+        oresult = -4;
 	sc_end:
 	return oresult;
 }
 
-inline static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return -1;
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return -1;
-    return 0;
-}
 
 
 typedef struct Call{
@@ -172,12 +164,12 @@ inline static int Call_construct(Call* self){
     self->count = 0;
     static_assert(RAND_MAX == 2147483647);
     int r = rand();
-    for (int i = 0; i < 6; ++i){
+    for (int i = 0; i < CALL_NAME_SZ-1; ++i){
     	self->callname[i] = r%26+'A';
-	r /= 26;
+	    r /= 26;
     }
-    self->callname[6] = '\0';    
     self->callname[CALL_NAME_SZ-1] = '\0';
+    RAND_priv_bytes(self->symm_key, SYMM_KEY_LEN);
     return 0;
 }
 
@@ -353,7 +345,7 @@ inline static int epfd_configuration(){
     }
     
     struct epoll_event ev;
-    ev.events = EPOLLIN; // событие - ввод. EPOLLOUT - вывод, EPOLLRDHUP - отсоединение
+    ev.events = EPOLLIN | EPOLLRDHUP; // событие - ввод. EPOLLOUT - вывод, EPOLLRDHUP - отсоединение
     ev.data.fd = tfd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &ev);
     
@@ -366,30 +358,49 @@ inline static int epfd_configuration(){
 inline static int handle_info_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    if (c->status != INFOCLIENT){
+        sslbuf_clean(buf);
+        c->status = INFOCLIENT;
+    }
 
     int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
     switch(ret){
         case CAUGHT_ERROR:{
-            struct NBSSL_Buffer* buf = &c->ssl_out;
+            struct NBSSL_Buffer* buf2 = &c->ssl_out;
+            sslbuf_clean(buf2);
+            struct ErrorInfo info = {
+                .command = ERRORUNKNOWNSERVER,
+                .previous_command = c->status,
+                .size = htons(buf->seekend)};
+            memcpy(info.data, buf->data, buf->seekend);
+            sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
             sslbuf_clean(buf);
-            sslbuf_write(buf, )
-            // TODO handle_
-            return;
+            return handle_errorunknown_server(c);
+            
         }
         case IS_COMPLETED:{
             c->status = DOING_NOTHING;
             break;
         }
         case ISNT_COMPLETED:{
-            c->status = SSL_ACCEPTING;
             break;
         }
     }
+    return ret;
 }
 
+/*
 inline static int handle_errorcalljoinmember(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    if (c->status != INFOCLIENT){
+        sslbuf_clean(buf);
+        c->status = INFOCLIENT;
+    }
+
+    int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
 }
 inline static int handle_errorcallnotmember(Connection *c){
     SSL* ssl = c->ssl;
@@ -405,65 +416,296 @@ inline static int handle_errorcallnopermissions(Connection *c){
 inline static int handle_errorcallnotowner(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
-
-
 }
+
 inline static int handle_errorcallnotexists(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
-
 }
+*/
 
 inline static int handle_callstart_server(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
-
-
+    
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = CALLSTARTSERVER;
+        }
+    }
+    return ret;
 }
 
 inline static int handle_callend_server(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
 
-
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = CALLENDSERVER;
+        }
+    }
+    return ret;
 }
 
 inline static int handle_calljoin_server(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
 
-
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = CALLJOINSERVER;
+        }
+    }
+    return ret;
 }
 
 inline static int handle_callleave_server(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
-
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = CALLLEAVESERVER;
+        }
+    }
+    return ret;
 }
 
 inline static int handle_callleaveowner_server(Connection *c){
     SSL *ssl = c->ssl;
     int fd = c->client_fd;
+
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = CALLLEAVEOWNERSERVER;
+        }
+    }
+    return ret;
 }
 
 inline static int handle_errorunknown_server(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
 
-
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = ERRORUNKNOWNSERVER;
+        }
+    }
+    return ret;
 }
 
 
 inline static int handle_callstart_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    /*if (c->status != CALLSTARTCLIENT){
+        sslbuf_clean(buf);
+        c->status = CALLSTARTCLIENT;
+    }
 
+    int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
+    switch(ret){
+        case CAUGHT_ERROR:{
+            struct NBSSL_Buffer* buf2 = &c->ssl_out;
+            sslbuf_clean(buf2);
+            struct ErrorInfo info = {
+                .command = ERRORUNKNOWNSERVER,
+                .previous_command = c->status,
+                .size = htons(buf->seekend)};
+            memcpy(info.data, buf->data, buf->seekend);
+            sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
+            sslbuf_clean(buf);
+            return handle_errorunknown_server(c);
+            
+        }
+        case IS_COMPLETED:{
+            struct ClientCommand callstart = {.};
+            c->status = DOING_NOTHING;
+            break;
+        }
+        case ISNT_COMPLETED:{
+            break;
+        }
+    }
+        
+    return ret;
+    вырожденный случай пустого сообщения    
+    */
+    Call* call = calloc(1, sizeof(Call));
+    Call_construct(call);
+    struct CallStartInfo info = {
+        .command = CALLSTARTSERVER,
+        .creator_fd = htons(c->client_fd)
+    };
+    memcpy(info.callname, call->callname, CALL_NAME_SZ);
+    memcpy(info.sym_key, call->symm_key, SYMM_KEY_LEN);
+    sslbuf_clean(&c->ssl_out);
+    sslbuf_write(&c->ssl_out, &info, sizeof(info));
+    c->calls[c->calls_count] = call;
+    c->calls_count++;
+    return handle_callstart_server(c);
 
 }
 
 inline static int handle_callend_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    if (c->status != CALLENDCLIENT){
+        sslbuf_clean(buf);
+        c->status = CALLENDCLIENT;
+    }
+
+    int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
+    switch(ret){
+        case CAUGHT_ERROR:{
+            struct NBSSL_Buffer* buf2 = &c->ssl_out;
+            sslbuf_clean(buf2);
+            struct ErrorInfo info = {
+                .command = ERRORUNKNOWNSERVER,
+                .previous_command = c->status,
+                .size = htons(buf->seekend)};
+            memcpy(info.data, buf->data, buf->seekend);
+            sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
+            sslbuf_clean(buf);
+            return handle_errorunknown_server(c);
+            
+        }
+        case IS_COMPLETED:{
+            c->status = DOING_NOTHING;
+            char callname[CALL_NAME_SZ];
+            sslbuf_read(buf, callname, CALL_NAME_SZ);
+            Call* call = Call_find(callname);
+            char call_found = 0;
+            for (int i = 0; i < c->calls_count; ++i){
+                if (c->calls[i] == call){
+                    call_found = 1;
+                    c->calls[i] = c->calls[c->calls_count-1];
+                    c->calls[c->calls_count-1] = NULL;
+                }
+            }
+            char j = 0;
+            if (call_found){
+                for (int i =0; i < call->count; ++i){
+                    Connection* conn = Connection_find(call->participants[i]);
+                    struct NBSSL_Buffer *obuf = &conn->ssl_out;
+                    char q = CALLENDSERVER;
+                    sslbuf_clean(obuf);
+                    sslbuf_write(obuf, &q, 1);
+                    sslbuf_write(obuf, callname, CALL_NAME_SZ);
+                    handle_callend_server(conn);
+                    if (call->participants[i] == c->client_fd)
+                        j = 1;
+                    else
+                        call->participants[i-j] = call->participants[i];
+                }
+                call->count -= 1;
+            }
+            else{
+                struct NBSSL_Buffer* buf2 = &c->ssl_out;
+                sslbuf_clean(buf2);
+                struct ErrorInfo info = {
+                    .command = ERRORUNKNOWNSERVER,
+                    .previous_command = c->status,
+                    .size = htons(buf->seekend)};
+                memcpy(info.data, buf->data, buf->seekend);
+                sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
+                sslbuf_clean(buf);
+                return handle_errorunknown_server(c);
+            }
+            break;
+        }
+        case ISNT_COMPLETED:{
+            break;
+        }
+    }
+    return ret;
 
 
 }
@@ -471,18 +713,105 @@ inline static int handle_callend_client(Connection *c){
 inline static int handle_calljoin_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    if (c->status != CALLJOINCLIENT){
+        sslbuf_clean(buf);
+        c->status = CALLJOINCLIENT;
+    }
+
+    int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
+    switch(ret){
+        case CAUGHT_ERROR:{
+            struct NBSSL_Buffer* buf2 = &c->ssl_out;
+            sslbuf_clean(buf2);
+            struct ErrorInfo info = {
+                .command = ERRORUNKNOWNSERVER,
+                .previous_command = c->status,
+                .size = htons(buf->seekend)};
+            memcpy(info.data, buf->data, buf->seekend);
+            sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
+            sslbuf_clean(buf);
+            return handle_errorunknown_server(c);
+            
+        }
+        case IS_COMPLETED:{
+            c->status = DOING_NOTHING;
+            char callname[CALL_NAME_SZ];
+            sslbuf_read(buf, callname, CALL_NAME_SZ);
+            Call* call = Call_find(callname);
+            for (int i = 0; i < call->count; ++i){
+                Connection *conn = Connection_find(call->participants[i]);
+                struct NBSSL_Buffer *obuf = &conn->ssl_out;
+                struct CallMemberInfo info = {
+                    .command = CALLNEWMEMBERSERVER,
+                    .member_id = htons(c->client_fd)
+                };
+                memcpy(info.callname, callname, CALL_NAME_SZ);
+                sslbuf_clean(obuf);
+                sslbuf_write(obuf, &info, sizeof(info));
+                handle_callnewmember_server(conn);
+            }
+            
+            struct CallFullInfo info = {
+                .command = CALLJOINSERVER,
+                .participants_count = htons(call->count)
+            };
+            memcpy(info.callname, callname, CALL_NAME_SZ);
+            memcpy(info.)
+            c->calls[c->calls_count] = call;
+            c->calls_count++;
+            call->participants[call->count] = c->client_fd;
+            call->count++;
+            break;
+        }
+        case ISNT_COMPLETED:{
+            break;
+        }
+    }
+    return ret;
 
 
 }
 
 inline static int handle_callnewmember_server(Connection *c){
-    SSL *ssl = c->ssl;
+    SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    
 }
 
 inline static int handle_callleave_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    if (c->status != CALLLEAVECLIENT){
+        sslbuf_clean(buf);
+        c->status = CALLLEAVECLIENT;
+    }
+
+    int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
+    switch(ret){
+        case CAUGHT_ERROR:{
+            struct NBSSL_Buffer* buf2 = &c->ssl_out;
+            sslbuf_clean(buf2);
+            struct ErrorInfo info = {
+                .command = ERRORUNKNOWNSERVER,
+                .previous_command = c->status,
+                .size = htons(buf->seekend)};
+            memcpy(info.data, buf->data, buf->seekend);
+            sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
+            sslbuf_clean(buf);
+            return handle_errorunknown_server(c);
+            
+        }
+        case IS_COMPLETED:{
+            c->status = DOING_NOTHING;
+            break;
+        }
+        case ISNT_COMPLETED:{
+            break;
+        }
+    }
+    return ret;
 
 
 }
@@ -490,6 +819,27 @@ inline static int handle_callleave_client(Connection *c){
 inline static int handle_errorunknown_client(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
+    struct NBSSL_Buffer* buf = &c->ssl_in;
+    if (c->status != ERRORUNKNOWNCLIENT){
+        sslbuf_clean(buf);
+        c->status = ERRORUNKNOWNCLIENT;
+    }
+
+    int ret = NB_SSL_read(ssl, fd, &c->flags, &c->ssl_in);
+    switch(ret){
+        case CAUGHT_ERROR:{
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:{
+            c->status = DOING_NOTHING;
+            break;
+        }
+        case ISNT_COMPLETED:{
+            break;
+        }
+    }
+    return ret;
 
 
 }
@@ -519,7 +869,9 @@ inline static int handle_listen(){
 #endif
 
     if (client_fd == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) 
+            // всё фигня, давай по новой
+            return;
         perror("accept");
         return;
     }
@@ -725,6 +1077,7 @@ inline static int handle_client(int fd){
             handle_errorunknown_server(c);
             break;
         }
+        /*
         case ERRORCALLJOINMEMBER:
         {
             handle_errorcalljoinmember(c);
@@ -779,7 +1132,7 @@ inline static int handle_client(int fd){
         {
             handle_callleaveowner_server(c);
             break;
-        }
+        }*/
     }
 
 

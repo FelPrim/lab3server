@@ -21,21 +21,18 @@ extern "C" {
 #define ERRORUNKNOWNSERVER 122
 
 #define MessageStruct(name, args) \
-    #pragma pack(push, 1) \
+    _Pragma("pack(push, 1)") \
     struct name{args}; \
-    #pragma pack(pop) \
-    static_assert(sizeof(struct name) <= MAXTLSSZ);
+    _Pragma("pack(pop)") \
+    static_assert(sizeof(struct name) <= MAXTLSSZ, "Struct "#name" too large")
 
-#pragma pack(push, 1)
-struct ErrorInfo{
-    char command;
-    char previous_command;
-    int size;
-    char data[2042];
-};
-#pragma pack(pop)
 
-static_assert(sizeof(struct ErrorInfo) <= MAXTLSSZ);
+MessageStruct(ErrorInfo, 
+    char command;   
+    char previous_command;   
+    int size;    
+    char data[2042]
+);
 
 #define ERRORCALLJOINMEMBER 123
 #define ERRORCALLNOTMEMBER 124
@@ -46,60 +43,64 @@ static_assert(sizeof(struct ErrorInfo) <= MAXTLSSZ);
 #define ERRORUNKNOWNCLIENT 5
 
 #define CALLSTARTCLIENT 1
-#pragma pack(push, 1)
-struct ClientCommand{
-    char command;
-};
-#pragma pack(pop)
-static_assert(sizeof(struct ClientCommand) <= MAXTLSSZ);
+MessageStruct(ClientCommand, char command;);
 
 #define CALLSTARTSERVER 128
-struct CallStartInfo{
+MessageStruct(CallStartInfo, 
     char command;
     char callname[CALL_NAME_SZ];
     char sym_key[SYMM_KEY_LEN];
     int creator_fd;
-};
+);
+
 #define CALLENDCLIENT 2
-struct CallCommand{
+MessageStruct(CallIdInfo,
     char command;
     char callname[CALL_NAME_SZ];
-};
+);
 #define CALLENDSERVER 129
-struct CallEndInfo{
-    char command;
-    char callname[CALL_NAME_SZ];
-};
 #define CALLJOINCLIENT 3
 
 #define CALLJOINSERVER 130
-struct CallJoinInfo{
+MessageStruct(CallFullInfo,
     char command;
     char callname[CALL_NAME_SZ];
     char sym_key[SYMM_KEY_LEN];
     char participants_count;
     int participants[255];
-};
-static_assert(sizeof(struct CallJoinInfo) <= MAXTLSSZ);
+);
 
 #define CALLNEWMEMBERSERVER 131
+MessageStruct(CallMemberInfo,
+    char command;
+    char callname[CALL_NAME_SZ];
+    int member_id;
+);
 #define CALLLEAVECLIENT 4
 #define CALLLEAVESERVER 132
+MessageStruct(CallUpdateInfo,
+    char command;
+    char callname[CALL_NAME_SZ];
+    int member_id;
+    char participants_count;
+);
 #define CALLLEAVEOWNERSERVER 133
 
 #define INFOCLIENT 255
-
+MessageStruct(InfoClient,
+    char command;
+    uint16_t udp_port;
+);
 
 #define SYMM_KEY_LEN 32
 
-<<<<<<< HEAD
 int encrypt(unsigned char *plaintext, int plaintext_len,
 unsigned char *key, unsigned char *ciphertext);
 
 
 int decrypt(unsigned char *ciphertext, int ciphertext_len, 
             unsigned char *key, unsigned char *plaintext);
-=======
+
 struct Call{
     int participants[CALL_MAXSZ]; // первый участник - владелец конференции
     uint32_t count;
@@ -107,7 +108,6 @@ struct Call{
     unsigned char symm_key[SYMM_KEY_LEN]; 
 };
 
->>>>>>> 5eb0ff6 (changes)
 
 #ifdef __cplusplus
 }
