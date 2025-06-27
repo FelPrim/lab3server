@@ -702,12 +702,11 @@ inline static int handle_callend_client(Connection *c){
             break;
         }
         case ISNT_COMPLETED:{
+            c->status = CALLENDCLIENT;
             break;
         }
     }
     return ret;
-
-
 }
 
 inline static int handle_calljoin_client(Connection *c){
@@ -751,13 +750,20 @@ inline static int handle_calljoin_client(Connection *c){
                 sslbuf_write(obuf, &info, sizeof(info));
                 handle_callnewmember_server(conn);
             }
-            
+            struct NBSSL_Buffer *obuf = &c->ssl_out;
+                
             struct CallFullInfo info = {
                 .command = CALLJOINSERVER,
                 .participants_count = htons(call->count)
             };
             memcpy(info.callname, callname, CALL_NAME_SZ);
-            memcpy(info.)
+            memcpy(info.sym_key, call->symm_key, SYMM_KEY_LEN);
+            for (int i = 0; i < call->count; ++i){
+                info.participants[i] = htons(call->participants[i]);
+            }
+            sslbuf_clean(obuf);
+            sslbuf_write(obuf, &info, 1+CALL_NAME_SZ+SYMM_KEY_LEN+1+call->count*sizeof(int));
+            handle_calljoin_server(c);
             c->calls[c->calls_count] = call;
             c->calls_count++;
             call->participants[call->count] = c->client_fd;
@@ -765,18 +771,37 @@ inline static int handle_calljoin_client(Connection *c){
             break;
         }
         case ISNT_COMPLETED:{
+            c->status = CALLJOINCLIENT;
             break;
         }
     }
     return ret;
-
-
 }
 
 inline static int handle_callnewmember_server(Connection *c){
     SSL* ssl = c->ssl;
     int fd = c->client_fd;
     
+    struct NBSSL_Buffer* buf = &c->ssl_out;
+    int ret = NB_SSL_write(ssl, fd, &c->flags, buf);
+    switch(ret){
+        case CAUGHT_ERROR:
+        {
+            Connection_delete_with_disconnectfromcalls(c);
+            break;
+        }
+        case IS_COMPLETED:
+        {
+            c->status = DOING_NOTHING;
+            sslbuf_clean(buf);
+            break;
+        }
+        case ISNT_COMPLETED:
+        {
+            c->status = CALLNEWMEMBERSERVER;
+        }
+    }
+    return ret;
 }
 
 inline static int handle_callleave_client(Connection *c){
@@ -805,9 +830,48 @@ inline static int handle_callleave_client(Connection *c){
         }
         case IS_COMPLETED:{
             c->status = DOING_NOTHING;
+            char callname[CALL_NAME_SZ];
+            int fd = 0;
+            char b = 0;
+            sslbuf_read(buf, callname, CALL_NAME_SZ);
+            sslbuf_read(buf, &fd, sizeof(int));
+            fd = ntohs(fd);
+            sslbuf_read(buf, &b, 1);
+            Call *call = Call_find(callname);
+            if (*call->participants == fd){
+                for (int j = 0; j < call->count; ++j){
+                    int participant = call->participants[j];
+                    Connection* conn = Connection_find(participant);
+                    struct NBSSL_Buffer *obuf = &conn->ssl_out;
+                    sslbuf_clean(obuf);
+                    char q = CALLLEAVEOWNERSERVER;
+                    sslbuf_write(obuf, &q, 1);
+                    sslbuf_write(obuf, call->callname, CALL_NAME_SZ);
+                    handle_callleaveowner_server(conn);
+                }
+                Call_delete(call);
+            }
+            else{
+                for (int j = 0; j < call->count; ++j){
+                    int participant = call->participants[j];
+                    Connection* conn = Connection_find(participant);
+                    struct NBSSL_Buffer * obuf = &conn->ssl_out;
+                    sslbuf_clean(obuf);
+                    char q = CALLLEAVESERVER;
+                    sslbuf_write(obuf, &q, 1);
+                    sslbuf_write(obuf, call->callname, CALL_NAME_SZ);
+                    int a = htons(fd);
+                    sslbuf_write(obuf, &a, sizeof(a));
+                    sslbuf_write(obuf, &b, 1);
+                    handle_callleave_server(conn);
+                }
+                if (b < 1)
+                    Call_delete(call);       
+            }
             break;
         }
         case ISNT_COMPLETED:{
+            c->status = CALLLEAVECLIENT;
             break;
         }
     }
@@ -836,6 +900,7 @@ inline static int handle_errorunknown_client(Connection *c){
             break;
         }
         case ISNT_COMPLETED:{
+            c->status = ERRORUNKNOWNCLIENT;
             break;
         }
     }
@@ -1078,6 +1143,8 @@ inline static int handle_client(int fd){
             break;
         }
         /*
+TODO если в результате уменьшения числа участников
+
         case ERRORCALLJOINMEMBER:
         {
             handle_errorcalljoinmember(c);
@@ -1188,14 +1255,32 @@ inline static void Connection_delete_with_disconnectfromcalls(Connection* self){
             for (int j = 1; j < call->count; ++j){
                 int participant = call->participants[j];
                 Connection* conn = Connection_find(participant);
-                //TODO handle_callend_server()
+                struct NBSSL_Buffer * obuf = &conn->ssl_out;
+                sslbuf_clean(obuf);
+                char q = CALLENDSERVER;
+                sslbuf_write(obuf, &q, 1);
+                sslbuf_write(obuf, call->callname, CALL_NAME_SZ);
+                handle_callend_server(conn);
             }
+            Call_delete(call);
         }
         else{
-
-        }
-        for (int j = 0; j < call->count; ++j){
-            int participant = call->participants[j];
+            char b = call->count-1;
+            for (int j = 0; j < call->count; ++j){
+                int participant = call->participants[j];
+                Connection* conn = Connection_find(participant);
+                struct NBSSL_Buffer * obuf = &conn->ssl_out;
+                sslbuf_clean(obuf);
+                char q = CALLLEAVESERVER;
+                sslbuf_write(obuf, &q, 1);
+                sslbuf_write(obuf, call->callname, CALL_NAME_SZ);
+                int a = htons(self->client_fd);
+                sslbuf_write(obuf, &a, sizeof(a));
+                sslbuf_write(obuf, &b, 1);
+                handle_callleave_server(conn);
+            }
+            if (b < 1)
+                Call_delete(call);       
         }
     }
     Connection_delete(self);
