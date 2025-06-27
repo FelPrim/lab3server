@@ -153,8 +153,9 @@ inline static Connection* Connection_find(int client_fd){
 
 inline static void Connection_delete(Connection* connection){
 	HASH_DEL(connections, connection);
+    if (connection->client_fd)
+        epoll_ctl(epfd, EPOLL_CTL_DEL, connection->client_fd, NULL);
 	Connection_destruct(connection);
-    epoll_ctl(epfd, EPOLL_CTL_DEL, connection->client_fd, NULL);
 }
 
 inline static void Connection_delete_with_disconnectfromcalls(Connection* self);
@@ -162,7 +163,7 @@ inline static void Connection_delete_with_disconnectfromcalls(Connection* self);
 inline static int Call_construct(Call* self){
     memset(self->participants, 0, CALL_MAXSZ*sizeof(int));
     self->count = 0;
-    static_assert(RAND_MAX == 2147483647);
+    static_assert(RAND_MAX == 2147483647, "26^6");
     int r = rand();
     for (int i = 0; i < CALL_NAME_SZ-1; ++i){
     	self->callname[i] = r%26+'A';
@@ -227,6 +228,7 @@ inline static int simple_starting_actions(){
     
     signal(SIGINT, calling_stop);
     signal(SIGTERM, calling_stop);
+    return 0;
 }
 
 inline static int init_ssl_ctx() {
@@ -266,8 +268,8 @@ inline static int init_ssl_ctx() {
 
     // 5. Настройки шифров (cipher suites)
     // — современный безопасный набор; можно адаптировать при необходимости
-    if (!SSL_CTX_set_cipher_list(ssl_ctx, "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")) {
-        fprintf(stderr, "Failed to set cipher list\n");
+    if (!SSL_CTX_set_ciphersuites(ssl_ctx, "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")) {
+        fprintf(stderr, "Failed to set cipher suites\n");
         return -1;
     }
 
@@ -372,7 +374,7 @@ inline static int handle_info_client(Connection *c){
             struct ErrorInfo info = {
                 .command = ERRORUNKNOWNSERVER,
                 .previous_command = c->status,
-                .size = htons(buf->seekend)};
+                .size = htonl((uint32_t) buf->seekend)};
             memcpy(info.data, buf->data, buf->seekend);
             sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
             sslbuf_clean(buf);
@@ -621,7 +623,7 @@ inline static int handle_callstart_client(Connection *c){
     Call_construct(call);
     struct CallStartInfo info = {
         .command = CALLSTARTSERVER,
-        .creator_fd = htons(c->client_fd)
+        .creator_fd = htonl((uint32_t) c->client_fd)
     };
     memcpy(info.callname, call->callname, CALL_NAME_SZ);
     memcpy(info.sym_key, call->symm_key, SYMM_KEY_LEN);
@@ -629,6 +631,7 @@ inline static int handle_callstart_client(Connection *c){
     sslbuf_write(&c->ssl_out, &info, sizeof(info));
     c->calls[c->calls_count] = call;
     c->calls_count++;
+    Call_add(call);
     return handle_callstart_server(c);
 
 }
@@ -650,7 +653,7 @@ inline static int handle_callend_client(Connection *c){
             struct ErrorInfo info = {
                 .command = ERRORUNKNOWNSERVER,
                 .previous_command = c->status,
-                .size = htons(buf->seekend)};
+                .size = htonl((uint32_t) buf->seekend)};
             memcpy(info.data, buf->data, buf->seekend);
             sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
             sslbuf_clean(buf);
@@ -693,7 +696,7 @@ inline static int handle_callend_client(Connection *c){
                 struct ErrorInfo info = {
                     .command = ERRORUNKNOWNSERVER,
                     .previous_command = c->status,
-                    .size = htons(buf->seekend)};
+                    .size = htonl((uint32_t) buf->seekend)};
                 memcpy(info.data, buf->data, buf->seekend);
                 sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
                 sslbuf_clean(buf);
@@ -726,7 +729,7 @@ inline static int handle_calljoin_client(Connection *c){
             struct ErrorInfo info = {
                 .command = ERRORUNKNOWNSERVER,
                 .previous_command = c->status,
-                .size = htons(buf->seekend)};
+                .size = htonl((uint32_t) buf->seekend)};
             memcpy(info.data, buf->data, buf->seekend);
             sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
             sslbuf_clean(buf);
@@ -743,7 +746,7 @@ inline static int handle_calljoin_client(Connection *c){
                 struct NBSSL_Buffer *obuf = &conn->ssl_out;
                 struct CallMemberInfo info = {
                     .command = CALLNEWMEMBERSERVER,
-                    .member_id = htons(c->client_fd)
+                    .member_id = htonl((uint32_t) c->client_fd)
                 };
                 memcpy(info.callname, callname, CALL_NAME_SZ);
                 sslbuf_clean(obuf);
@@ -754,12 +757,12 @@ inline static int handle_calljoin_client(Connection *c){
                 
             struct CallFullInfo info = {
                 .command = CALLJOINSERVER,
-                .participants_count = htons(call->count)
+                .participants_count = htonl((uint32_t) call->count)
             };
             memcpy(info.callname, callname, CALL_NAME_SZ);
             memcpy(info.sym_key, call->symm_key, SYMM_KEY_LEN);
             for (int i = 0; i < call->count; ++i){
-                info.participants[i] = htons(call->participants[i]);
+                info.participants[i] = htonl((uint32_t) call->participants[i]);
             }
             sslbuf_clean(obuf);
             sslbuf_write(obuf, &info, 1+CALL_NAME_SZ+SYMM_KEY_LEN+1+call->count*sizeof(int));
@@ -821,7 +824,7 @@ inline static int handle_callleave_client(Connection *c){
             struct ErrorInfo info = {
                 .command = ERRORUNKNOWNSERVER,
                 .previous_command = c->status,
-                .size = htons(buf->seekend)};
+                .size = htonl((uint32_t) buf->seekend)};
             memcpy(info.data, buf->data, buf->seekend);
             sslbuf_write(buf2, &info, 1+1+sizeof(int)+buf->seekend);
             sslbuf_clean(buf);
@@ -835,7 +838,7 @@ inline static int handle_callleave_client(Connection *c){
             char b = 0;
             sslbuf_read(buf, callname, CALL_NAME_SZ);
             sslbuf_read(buf, &fd, sizeof(int));
-            fd = ntohs(fd);
+            fd = ntohl(fd);
             sslbuf_read(buf, &b, 1);
             Call *call = Call_find(callname);
             if (*call->participants == fd){
@@ -860,7 +863,7 @@ inline static int handle_callleave_client(Connection *c){
                     char q = CALLLEAVESERVER;
                     sslbuf_write(obuf, &q, 1);
                     sslbuf_write(obuf, call->callname, CALL_NAME_SZ);
-                    int a = htons(fd);
+                    int a = htonl((uint32_t) fd);
                     sslbuf_write(obuf, &a, sizeof(a));
                     sslbuf_write(obuf, &b, 1);
                     handle_callleave_server(conn);
@@ -1236,7 +1239,7 @@ int main(){
 		    else if (unlikely(fd == tfd))
                 handle_listen();
 		    else 
-                handle_client(&fd);
+                handle_client(fd);
 	    }
     }
 
@@ -1274,7 +1277,7 @@ inline static void Connection_delete_with_disconnectfromcalls(Connection* self){
                 char q = CALLLEAVESERVER;
                 sslbuf_write(obuf, &q, 1);
                 sslbuf_write(obuf, call->callname, CALL_NAME_SZ);
-                int a = htons(self->client_fd);
+                int a = htonl((uint32_t) self->client_fd);
                 sslbuf_write(obuf, &a, sizeof(a));
                 sslbuf_write(obuf, &b, 1);
                 handle_callleave_server(conn);
