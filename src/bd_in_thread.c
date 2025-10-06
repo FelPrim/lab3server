@@ -16,14 +16,11 @@
 #include <signal.h>
 #include <pthread.h>
 
-
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-
 //////////////////////////////////////////////////
 // SIGNALS
 
-
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
 volatile sig_atomic_t stop_requested = 0;
 volatile sig_atomic_t reload_requested = 0;
 char stop_server = 0;
@@ -39,62 +36,15 @@ void calling_reload(int signo){
 }
 
 //////////////////////////////////////////////////
-// INTERNET
+// PROTOCOL
 #define TPORT 23230
 #define UPORT 23231
-#define TPSTR "23230"
-#define UPSTR "23231"
-#define BACKLOG 10
 
-int socket_configure(int *sock_fd, struct addrinfo *result){
-    struct addrinfo *p;
-    int oresult = 0;
-    for (p = result, p != NULL; p=p->ai_next){
-        if ((*sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol)) < 0){
-            perror("socket");
-            continue;
-        }
-		int opt = 1;
-        if (setsockopt(*sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizoef(opt)) < 0){
-            perror("setsockopt");
-            continue;
-        }
-        if (bind(*sock_fd, result->ai_addr, result->ai_addrlen) < 0){
-            perror("bind");
-            oresult = 3;
-            continue;
-        }
-		break;
-    }
-	
-	freeaddrinfo(result);		
-	int flags = fcntl(*sock_fd, F_GETFL, 0);
-	if (flags < 0){
-		perror("fcntl_getfl");
-		oresult = 4;
-		goto sc_end;
-	}
-	if (fcntl(*sock_fd, F_SETFL, flags | O_NONBLOCK) < 0){
-		perror("fcntl_setfl");
-		oresult = 5;
-		goto sc_end;
-	}
-	sc_end:
-	return oresult;
-}
-
-struct Connections{
-    void* mem; // TODO понять что это
-    int *socks;
-    uint32_t size;
-    uint32_t count;
-};
 
 //////////////////////////////////////////////////
 // BD
 // живёт на одном, своём потоке
 
-// TODO change type
 typedef int TASK; // не int
 
 // Удаляется самый старый элемент -> очередь 
@@ -173,6 +123,7 @@ pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  queue_cond  = PTHREAD_COND_INITIALIZER;
 
 void do_task(TASK* task){
+    printf("i: %d\n", *task);
     // TODO implement
 }
 
@@ -210,6 +161,7 @@ int enqueue_task(TASK* task){
 //////////////////////////////////////////////////
 // LOGIC
 
+
 int main(){
     // собираю информацию об ошибках в error.log
     if (freopen("error.log", "w", stderr) == NULL){
@@ -240,48 +192,10 @@ int main(){
         exit(EXIT_FAILURE);
     }
     // db_thread_fn работает
-
-    int tfd, ufd;
-    {
-    struct addrinfo hints;
-    struct addrinfo *result;
-    memset(&hints, 0, sizeof(hints));
-
-    hints.ai_family = AF_INET;
-    hints.ai_flags = AI_PASSIVE;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    int status = getaddrinfo(NULL, TPSTR, &hints, &result);
-    if (status){
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-        exit(EXIT_FAILURE);
-    }
-    status = socket_configure(&tfd, result);
-    if (status){
-        exit(EXIT_FAILURE);
-    }
-    }
-    //if (listen(tfd, BACKLOG) < 0){
-    //    perror("listen");
-    //    stop_server = 1;
-    //}
-    {
-    struct addrinfo hints;
-    struct addrinfo *result;
-    memset(&hints, 0, sizeof(hints));
-
-    hints.ai_family = AF_INET;
-    hints.ai_flags = AI_PASSIVE;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_protocol = IPPROTO_UDP;
-
-    getaddrinfo(NULL, UPSTR, &hints, &result);
-    socket_configure(&ufd, result);
-    }
-    
+    int i = 0;
     while (!stop_server){
-
+        enqueue_task(&i);
+        ++i;
     }
     
     // завершение работы
