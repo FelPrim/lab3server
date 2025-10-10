@@ -38,13 +38,15 @@ void calling_reload(int signo){
     stop_server = 1;
 }
 
+#define MAX_EVENTS 64
+
+
 //////////////////////////////////////////////////
 // INTERNET
 #define TPORT 23230
 #define UPORT 23231
 #define TPSTR "23230"
 #define UPSTR "23231"
-#define BACKLOG 10
 
 int socket_configure(int *sock_fd, struct addrinfo *result){
     struct addrinfo *p;
@@ -186,7 +188,6 @@ void* db_thread_fn(void* args){
         }
         if (task_queue.count == 0 && stop_server){
             // выход
-            Queue_destruct(&task_queue);
             pthread_mutex_unlock(&queue_mutex);
             break;
         }
@@ -220,28 +221,19 @@ int main(){
         perror("setvbuf failed");
         exit(EXIT_FAILURE);
     }
+
+    // кастомизирую обработку сигналов
     signal(SIGINT, calling_stop);
     signal(SIGTERM, calling_stop);
     signal(SIGHUP, calling_reload);
     // игнорирую сигнал связанный с записью в закрытый другой стороной сокет
     // signal(SIGPIPE, SIG_IGN);
     
+
     SERVER_START:
-    int status = Queue_construct(&task_queue, TASKS_STARTINGSIZE);
-    if (status)
-        return status;
 
-    pthread_t db_thread;
-    // дескриптор, атрибуты (default), указатели на: функцию, параметры
-    int thread_status = pthread_create(&db_thread, NULL, db_thread_fn, NULL);
-    if (thread_status != 0){
-        fprintf(stderr, "pthread_create, status=%d\n", thread_status);
-        perror("pthread_create");
-        exit(EXIT_FAILURE);
-    }
-    // db_thread_fn работает
-
-    int tfd, ufd;
+    // TCP и UDP сокеты
+    int tfd = 0, ufd = 0;
     {
     struct addrinfo hints;
     struct addrinfo *result;
@@ -259,13 +251,16 @@ int main(){
     }
     status = socket_configure(&tfd, result);
     if (status){
+	if (tfd)
+		close(tfd);
         exit(EXIT_FAILURE);
     }
     }
-    //if (listen(tfd, BACKLOG) < 0){
-    //    perror("listen");
-    //    stop_server = 1;
-    //}
+    if (listen(tfd, SOMAXCONN) < 0){
+        perror("listen");
+	close(tfd);
+	exit(EXIT_FAILURE);
+    }
     {
     struct addrinfo hints;
     struct addrinfo *result;
@@ -275,13 +270,93 @@ int main(){
     hints.ai_flags = AI_PASSIVE;
     hints.ai_socktype = SOCK_DGRAM;
     hints.ai_protocol = IPPROTO_UDP;
-
-    getaddrinfo(NULL, UPSTR, &hints, &result);
-    socket_configure(&ufd, result);
+    
+    int status =  getaddrinfo(NULL, UPSTR, &hints, &result);
+    if (status){
+    	fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
+	close(tfd);
+        exit(EXIT_FAILURE);
     }
     
-    while (!stop_server){
+    status = socket_configure(&ufd, result);
+    if (status){
+    	close(tfd);
+	if (ufd)
+		close(ufd);
+	exit(EXIT_FAILURE);
+    }
+    }
+    // epoll дескриптор - управляет обновлениями состояний, указанных с помощью epoll_ctl(... EPOLL_CTL_ADD ...) дескрипторов
+    int epfd = epoll_create1(0);
+    if (epfd == -1){
+    	perror("epoll_create1");
+	exit(EXIT_FAILURE);
+    }
 
+    // ev - временная переменная, events - хранят информацию о событиях
+    struct epoll_event ev, events[MAX_EVENTS];
+    ev.events = EPOLLIN; // событие - ввод. EPOLLOUT - вывод, EPOLLRDHUP - отсоединение
+    ev.data.fd = tfd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &ev);
+    
+    ev.events = EPOLLIN;
+    ev.data.fd = ufd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, ufd, &ev);
+
+    // Когда к нам подсоединяется новый клиент, он тоже добавляется к epfd. Кроме EPOLLIN он может в EPOLLRDHUP
+    // Когда отсоединяется - удаляется.
+
+    /* КОГДА epoll_wait обрабатывает EPOLLIN на tfd:
+     * int client_fd = accept(tfd, ...)
+     * set_nonblocking(client_fd);
+     *
+     * ev.events = EPOLLIN | EPOLLRDHUP
+     * ev.data.fd = client_fd
+     * epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev)
+     *
+     * КОГДА epoll_wait обрабатывает EPOLLIN на client_fd:
+     * recv(fd, buffer, sizeof(buffer), 0);
+     *
+     * КОГДА epoll_wait обрабатывает EPOLLRDHUP:
+     * 
+     * КОГДА epoll_wait обрабатывает EPOLLIN:
+     * recvfrom(ufd, buf, sizeof(buf), 0, (struct sockaddr*)&cliaddr, &len);
+     *
+     * */
+
+    // Структура для хранения запросов к БД
+    int status = Queue_construct(&task_queue, TASKS_STARTINGSIZE);
+    if (status)
+        exit(EXIT_FAILURE);
+
+
+    pthread_t db_thread;
+    // дескриптор, атрибуты (default), указатели на: функцию, параметры
+    int thread_status = pthread_create(&db_thread, NULL, db_thread_fn, NULL);
+    if (thread_status != 0){
+        fprintf(stderr, "pthread_create, status=%d\n", thread_status);
+        perror("pthread_create");
+        exit(EXIT_FAILURE);
+    }
+    // db_thread_fn работает
+
+    while (!stop_server){
+	int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
+	for (int i = 0; i < n; ++i){
+		int fd = events[i].data.fd;
+		/*
+		 * как-то поумнее
+		 * */
+		if (fd == tfd){
+			// Думаем
+		}
+		else if (fd == ufd){
+			// Пересылаем
+		}
+		else {
+			// fd = client_fd
+		}
+	}
     }
     
     // завершение работы
@@ -294,6 +369,11 @@ int main(){
 
     if (reload_requested)
         goto SERVER_START;
+    
+    SERVER_END:
+    Queue_destruct(&task_queue);
+    close(tfd);
+    close(ufd);
 
     return 0;
 }
