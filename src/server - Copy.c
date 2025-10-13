@@ -15,7 +15,7 @@
 
 #include <signal.h>
 #include <pthread.h>
-#include <sqlite3.h>
+
 
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -108,89 +108,13 @@ struct Connections{
 // Пусть логин будет не больше 256 байт. + байт на длину логина. Также в 1 бите хранится информация о том, используется только ASCII или всё-таки используется Unicode
 // Аналогично с паролем
 struct MyString{
-    char* data; // <= 127 bytes.  EDIT: 255 EDITEDIT: логично делать строки в C... C-style
-    //char uoa_len; // bit: unicode or asci, else: len. Но у меня не может быть строки с длиной 0... 
+    char* data; // <= 127 bytes. 
+    char uoa_len; // bit: unicode or asci, else: len. Но у меня не может быть строки с длиной 0... 
                   // Пусть uoa_len=0 - это ascii длиной 1, =1 - длиной 2, ... 0x7f - длиной 128, 0x80 - unicode длиной 1, ... 0xfe - длиной 128, 0xff - длиной 129
-                  // EDIT: коды для ascii символов в UTF8 совпадают => нет смысла отдельно форматировать ascii.
-    //char len;
 };
 
 // TODO change type
-//typedef int TASK; // не int
-
-typedef struct Task{
-    void* payload;
-    //unsigned short size;
-    //unsigned char command_and_id;
-    unsigned int size;
-    unsigned short id; // id относится к таблице
-    unsigned char command; // всё равно sizeof(TASK) = 16
-} TASK;
-
-/*
-inline int command_from_Task(TASK task){
-    return (0xc0 & task.command_and_id) >> 6;
-}
-
-inline int id_from_Task(TASK task){
-    return 0x3F & task.command_and_id;
-}
-*/
-
-struct Login_Pasword{struct MyString login; struct MyString password; };
-struct User_User{struct MyString first; struct MyString second; };
-
-void do_task(TASK task, struct Queue *task_queue){
-    switch (((int) (task.id) << 8)+task.command){
-//////////////////// логин пароль
-        case 0:
-        { // добавление
-        (struct Login_Password*)data = task.payload;
-        
-        break;
-        }
-        case 1:
-        { // удаление
-        (struct Login_Password*)data = task.payload;
-        
-        break;
-        }
-        //case 2:
-        //{ // 
-        //
-        //break;
-        //}
-//////////////////// запрос на добавление в друзья
-        case 0x100:{
-        // добавление
-        (struct User_User*)data = task.payload;
-
-        break;
-        }
-        case 0x101:{
-        // удаление
-        (struct User_User*)data = task.payload;
-
-        break;
-        }
-//////////////////// друзья
-        case 0x200:{
-        // добавление
-        (struct User_User*)data = task.payload;
-
-        break;
-        }
-        case 0x201:{
-        // удаление
-        (struct User_User*)data = task.payload;
-
-        break;
-        }
-        default:
-
-
-    }
-}
+typedef int TASK; // не int
 
 // Удаляется самый старый элемент -> очередь 
 // Потенциально неограниченное число элементов -> данные на куче
@@ -200,8 +124,6 @@ struct Queue {
     //TASK* first; // указатель на первый элемент
     uint32_t shift; // first = mem + shift
     uint32_t count; // число элементов.
-
-    sqlite3* db; // БД в которую записываются изменения
 };
 
 // # - Выделенная память
@@ -210,10 +132,9 @@ struct Queue {
 void Queue_destruct(struct Queue* self){
     assert(self);
     free(self->mem);
-    sqlite3_close(self->db);
 }
 
-int Queue_append(struct Queue* self, TASK elem){
+int Queue_append(struct Queue* self, TASK* elem){
     assert(self);
     if (unlikely(self->count >= self->size)){
         fprintf(stderr, "%d\n", self->size);
@@ -241,7 +162,7 @@ int Queue_append(struct Queue* self, TASK elem){
         self->size = new_sz;
     }
     uint32_t index = (self->shift+self->count)%self->size;
-    ((TASK*) self->mem)[index] = elem;
+    ((TASK*) self->mem)[index] = *elem;
     self->count++;
     return 0;
 } 
@@ -253,7 +174,7 @@ void Queue_shift(struct Queue* self){
     self->count--;
 }
 
-int Queue_construct(struct Queue* self, uint32_t size, FILE** files){
+int Queue_construct(struct Queue* self, uint32_t size){
     assert(self);
     self->size = size;
     self->shift = 0;
@@ -263,37 +184,6 @@ int Queue_construct(struct Queue* self, uint32_t size, FILE** files){
         perror("[malloc]");
         return EXIT_FAILURE;
     }
-    sqlite3_open("data.db", &self->db);
-    const char CREATE_TABLES_IF_THEY_DONT_EXIST = 
-    "CREATE TABLE IF NOT EXISTS authentication ("
-    " id INTEGER PRIMARY KEY AUTOINCREMENT."
-    " login TEXT UNIQUE NOT NULL,"
-    " password TEXT NOT NULL); "
-    "CREATE TABLE IF NOT EXISTS friends ("
-    " lfriend INTEGER ,"
-    " rfriend INTEGER ,"
-    " PRIMARY KEY (lfriend, rfriend)); "
-    "CREATE TABLE IF NOT EXISTS friend_requests ("
-    " sender INTEGER,"
-    " reciever INTEGER,"
-    " PRIMARY KEY (sender, reciever));";
-    char *err_msg = NULL;
-    if (sqlite3_exec(self->db, CREATE_TABLES_IF_THEY_DONT_EXIST, 0, 0, &err_msg) != SQLITE_OK){
-        fprintf(stderr, "CREATING TABLES: %s\n", err_msg);
-        sqlite3_free(err_msg);
-        sqlite3_close(self->db);
-        return 1;
-    }
-
-// Добавлять / изменять / удалять - 2 бита
-// id БД. Базы данных:
-// Authentication, Friend Requests, Friends - так-то 2 бита
-// Дополнительная информация
-//            | Authentication     | Friend Requests        | Friends
-// Удаление   | логин              | отправитель-получатель | друг1-друг2
-// Добавление | логин-пароль       | отправитель-получатель | друг1-друг2
-// Изменение  | логин-новый пароль | ???                    | ???
-    
     return 0;
 }
 
@@ -303,7 +193,9 @@ struct Queue task_queue;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  queue_cond  = PTHREAD_COND_INITIALIZER;
 
-
+void do_task(TASK* task){
+    // TODO implement
+}
 
 void* db_thread_fn(void* args){
     assert(task_queue.mem);
@@ -327,7 +219,7 @@ void* db_thread_fn(void* args){
     }
 }
 
-int enqueue_task(TASK task){
+int enqueue_task(TASK* task){
     pthread_mutex_lock(&queue_mutex);
     int status = Queue_append(&task_queue, task);
     pthread_cond_signal(&queue_cond);
@@ -336,43 +228,6 @@ int enqueue_task(TASK task){
 }
 
 //////////////////////////////////////////////////
-// LOGIC
-
-int main(){
-    // собираю информацию об ошибках в error.log
-    if (freopen("error.log", "w", stderr) == NULL){
-        perror("freopen failed");
-        exit(EXIT_FAILURE);
-    }
-    if (setvbuf(stderr, NULL, _IOLBF, 0) != 0) {
-        perror("setvbuf failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // кастомизирую обработку сигналов
-    signal(SIGINT, calling_stop);
-    signal(SIGTERM, calling_stop);
-    signal(SIGHUP, calling_reload);
-    // игнорирую сигнал связанный с записью в закрытый другой стороной сокет
-    // signal(SIGPIPE, SIG_IGN);
-    
-
-    SERVER_START:
-
-    // TCP и UDP сокеты
-    int tfd = 0, ufd = 0;
-    {
-    struct addrinfo hints;
-    struct addrinfo *result;
-    memset(&hints, 0, sizeof(hints));
-
-    hints.ai_family = AF_INET;
-    hints.ai_flags = AI_PASSIVE;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    int status = getaddrinfo(NULL, TPSTR, &hints, &result);
-    if (status){
 // LOGIC
 
 int main(){
@@ -487,6 +342,9 @@ int main(){
      * recvfrom(ufd, buf, sizeof(buf), 0, (struct sockaddr*)&cliaddr, &len);
      *
      * */
+
+    // Структура для хранения запросов к БД
+    int status = Queue_construct(&task_queue, TASKS_STARTINGSIZE);
     if (status)
         exit(EXIT_FAILURE);
 
@@ -504,3 +362,37 @@ int main(){
     while (!stop_server){
 	    int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
 	    for (int i = 0; i < n; ++i){
+	    	int fd = events[i].data.fd;
+		    /*
+		    * как-то поумнее
+		    * */
+		    if (fd == tfd){
+			    // Думаем
+		    }
+		    else if (fd == ufd){
+		    	// Пересылаем
+		    }
+		    else {
+		    	// fd = client_fd
+		    }
+	    }
+    }
+    
+    // завершение работы
+    pthread_mutex_lock(&queue_mutex);
+    stop_server = true;
+    pthread_cond_signal(&queue_cond);
+    pthread_mutex_unlock(&queue_mutex);
+
+    pthread_join(db_thread, NULL);
+
+    if (reload_requested)
+        goto SERVER_START;
+    
+    SERVER_END:
+    Queue_destruct(&task_queue);
+    close(tfd);
+    close(ufd);
+
+    return 0;
+}
