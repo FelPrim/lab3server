@@ -1,0 +1,21 @@
+{
+    "files.associations": {
+        "filesystem": "c",
+        "chrono": "c",
+        "codecvt": "c",
+        "xlocale": "c",
+        "functional": "c",
+        "sqlite3.h": "c",
+        "expected": "c",
+        "cstdint": "c",
+        "winsock2.h": "c",
+        "bitset": "c",
+        "iterator": "c",
+        "xhash": "c",
+        "xmemory": "c",
+        "xtree": "c",
+        "flat_map": "c",
+        "format": "c"
+    },
+    "C_Cpp.errorSquiggles": "enabled"
+}
