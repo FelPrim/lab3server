@@ -275,7 +275,7 @@ int Connections_destruct(struct Connections* self){
 
 // тоже должно быстро определяться. В данном случае по callname.
 typedef struct Call{
-    int *participants;
+    int *participants; // первый участник - владелец конференции
     uint32_t size;
     uint32_t count;
     char callname[7]; // key
@@ -754,7 +754,7 @@ int post_login(const char* login, const char* password, sqlite3* db){
         sqlite3_finalize(stmt);
         int ext = sqlite3_extended_errcode(db);
         if (ext == SQLITE_CONSTRAINT_UNIQUE){
-            // послать на клиент информацию о том, что такой логин уже зарегестрирован
+            // послать на клиент информацию о том, что такой логин уже зарегистрирован
             // для этого нужно узнать сокет клиента 
             
             // TODO
@@ -779,7 +779,38 @@ int post_login(const char* login, const char* password, sqlite3* db){
     return status;
 }
 
-int delete_login(const char* login, sqlite3 *bd){
+int delete_login(const char* login, sqlite3 *db){
+    const char sql[] = "DELETE FROM authentication WHERE login = ?;";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK){
+        fprintf(stderr, "sqlite3_prepare_v2: %s\n", sqlite3_errmsg(db));
+        return rc;
+    }
+    rc = sqlite3_bind_text(stmt, 1, login, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK){
+        fprintf(stderr, "sqlite3_bind_text: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return rc;
+    }
+    rc = sqlite3_step(stmt);
+    if  (rc != SQLITE_DONE){
+        fprintf(stderr, "sqlite3_step: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return rc;
+    }
+    // TODO проверить что не бред
+    int changes = sqlite3_changes(db);
+    if (changes == 0){
+        // пользователь не найден
+    }
+    else{
+        // kjhkksfk
+    }
+
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+
     // TODO
 }
 
