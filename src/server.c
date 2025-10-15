@@ -3,6 +3,7 @@
 #include <string.h>
 #include <assert.h>
 #include <limits.h>
+#include <time.h>
 
 #include <errno.h>
 #include <unistd.h>
@@ -18,12 +19,12 @@
 #include <signal.h>
 #include <pthread.h>
 
-
+// deps
 #include <sqlite3.h>
 #include <sodium.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-
+#include "uthash.h"
 
 #include "protocol.h"
 
@@ -95,6 +96,7 @@ int socket_configure(int *sock_fd, struct addrinfo *result){
 	return oresult;
 }
 
+// TODO подумать над тем, чтобы хранить буфер в стеке, а не куче
 struct Buffer{
     char *mem;
     uint32_t size;
@@ -116,6 +118,7 @@ int Buffer_construct(struct Buffer* self){
     self->expected_endseek = 0;
     return 0;
 }
+
 int Buffer_destruct(struct Buffer* self){
     free(self->mem);
     return 0;
@@ -157,47 +160,70 @@ int Buffer_write(struct Buffer* self, char *data, uint32_t size){
 }
 
 
-struct Connection{
+typedef struct Connection{
     struct Buffer buffer;
     struct sockaddr_in udp_addr; 
     SSL *ssl;
-    //int client_fd; // tcp
-    //int client_id; // authentication(ID, login, password)
-};
+    int client_fd; // key
+    int client_id; 
+    UT_hash_handle hh;
+} Connection;
 
-int Connection_construct(struct Connection* self){
+Connection *connections = NULL;
+
+int Connection_construct(Connection* self){
     self->ssl = NULL;
     return Buffer_construct(&self->buffer);
     // TODO обмозговать
 }
 
-int Connection_destruct(struct Connection* self){
+int Connection_destruct(Connection* self){
     if (self->ssl)
         SSL_free(self->ssl);
     return Buffer_destruct(&self->buffer);
 }
 
-struct Connections{
-    struct Connection *connections;
-    int *client_fds;
-    int *client_ids;
-    uint32_t *free_mem; // указывают на места, выделенные под хранение удалённых соединений
-    uint32_t size;
-    uint32_t free_size;
-    uint32_t count;
-    uint32_t free_count;
-};
+void Connection_add(Connection* elem){
+	HASH_ADD_INT(connections, client_fd, elem);
+}
 
+Connection* Connection_find(int client_fd){
+	Connection* result;
+	HASH_FIND_INT(connections, &client_fd, result);
+	return result;
+}
+
+void Connection_delete(Connection* connection){
+	HASH_DEL(connections, connection);
+	Connection_destruct(connection);
+	// TODO стоит ли free(connection)?
+}
+
+// из-за того, как работает epoll, задача такая: минимизировать время нахождения соединения при известном сокете.
+// => структура хеш-таблица. Загуглил - можно использовать uthash вместо того, чтоб писать самому
+//struct Connections{
+//    struct Connection *connections;
+//    int *client_fds;
+//    int *client_ids;
+//    uint32_t *free_mem; // указывают на места, выделенные под хранение удалённых соединений
+//    uint32_t size;
+//    uint32_t free_size;
+//    uint32_t count;
+//    uint32_t free_count;
+//};
+/*
 int Connections_construct(struct Connections* self, uint32_t size, uint32_t free_size){
     self->size = size;
     self->connections = malloc(self->size*sizeof(struct Connection));
     if (!self->connections){
         perror("malloc");
+	goto CC_connections_handler;
     }
     uint32_t last_ok_i_plus_one = 0;
     for (uint32_t i = 0; i < self->size; ++i){
         if (!Connection_construct(self->connections+i)){
             perror("Connection_construct");
+	    goto CC_connection_construct_handler;
         }
         else
             last_ok_i_plus_one = i+1;
@@ -205,15 +231,18 @@ int Connections_construct(struct Connections* self, uint32_t size, uint32_t free
     self->client_fds = calloc(self->size, sizeof(int));
     if (!self->client_fds){
         perror("calloc");
+	goto CC_fds_calloc_handler;
     }
     self->client_ids = calloc(self->size, sizeof(int));
     if (!self->client_ids){
         perror("calloc");
+	goto CC_ids_calloc_handler;
     }
     self->free_size = free_size;
     self->free_mem = malloc(self->free_size*sizeof(uint32_t));
     if (!self->free_mem){
         perror("malloc");
+	goto CC_free_mem_malloc_handler;
     }
     self->count = 0;
     self->free_count = 0;
@@ -242,15 +271,59 @@ int Connections_destruct(struct Connections* self){
     free(self->free_mem);
     return status;
 }
+*/
 
-struct Call{
-    char *callname;
+// тоже должно быстро определяться. В данном случае по callname.
+typedef struct Call{
     int *participants;
     uint32_t size;
     uint32_t count;
-};
+    char callname[7]; // key
+    UT_hash_handle hh;
+} Call;
 
-struct Calls{
+Call *calls = NULL;
+
+int Call_construct(Call* self, uint32_t size){
+    self->size = size;
+    self->participants = calloc(size, sizeof(int));
+    if (!self->participants){
+    	perror("calloc");
+	return 1;
+    }
+    self->count = 0;
+    static_assert(RAND_MAX == 2147483647);
+    int r = rand();
+    for (int i = 0; i < 6; ++i){
+    	self->callname[i] = r%26;
+	r /= 26;
+    }
+    self->callname[6] = '\0';
+    return 0;
+}
+
+int Call_destruct(Call* self){
+    free(self->participants);
+    return 0;
+}
+
+void Call_add(Call* elem){
+	HASH_ADD_STR(calls, callname, elem);
+}
+
+Call* Call_find(char callname[7]){
+	Call* result;
+	HASH_FIND_STR(calls, &callname, result);
+	return result;
+}
+
+void Call_delete(Call* call){
+	HASH_DEL(calls, call);
+	Call_destruct(call);
+	// TODO подумать о том, стоит ли free(call)?
+}
+
+/*struct Calls{
     struct Call *calls; // TODO раскумекать
     uint32_t *free_mem;
     uint32_t size;
@@ -258,7 +331,7 @@ struct Calls{
     uint32_t free_size;
     uint32_t free_count;
 };
-
+*/
 /*
 struct User{
     char *login;
@@ -531,22 +604,22 @@ int QueueTS_wait_and_get_result(struct QueueTS* self, Result* result){
 // epfd - дескриптор, задающий "центр асинхронности"
 // event_fd - счётчик. Можно из одного потока увеличить значение счётчика, и тогда epoll заметит что произошел EPOLLIN
 int Worker_construct(struct Worker* self, int *epfd, int *event_fd){
-    int result = QueueTS_construct(self->completion_queue, TASKS_STARTINGSIZE);
+    int result = QueueTS_construct(&self->completion_queue, TASKS_STARTINGSIZE);
     if (unlikely(result)){
         perror("completion_queue construct");
         return result;
     }
-    result = QueueTS_construct(self->submission_queue, TASKS_STARTINGSIZE);
+    result = QueueTS_construct(&self->submission_queue, TASKS_STARTINGSIZE);
     if (unlikely(result)){
         perror("submission_queue construct");
-        QueueTS_destruct(self->completion_queue);
+        QueueTS_destruct(&self->completion_queue);
         return result;
     }
     result = sqlite3_open("data.db", &self->db);
     if (unlikely(result != SQLITE_OK)){
         perror("data.db open");
-        QueueTS_destruct(self->submission_queue);
-        QueueTS_destruct(self->completion_queue);
+        QueueTS_destruct(&self->submission_queue);
+        QueueTS_destruct(&self->completion_queue);
         return result;
     }
     const char CREATE_TABLES_IF_THEY_DONT_EXIST[] = 
@@ -578,8 +651,8 @@ int Worker_construct(struct Worker* self, int *epfd, int *event_fd){
         fprintf(stderr, "%s\n", err_msg);
         sqlite3_free(err_msg);
         sqlite3_close(self->db);
-        QueueTS_destruct(self->submission_queue);
-        QueueTS_destruct(self->completion_queue);
+        QueueTS_destruct(&self->submission_queue);
+        QueueTS_destruct(&self->completion_queue);
         return result;
     }
 
@@ -601,11 +674,11 @@ int Worker_construct(struct Worker* self, int *epfd, int *event_fd){
 }
 
 int Worker_destruct(struct Worker* self){
-    int result = QueueTS_destruct(self->completion_queue);
+    int result = QueueTS_destruct(&self->completion_queue);
     if (unlikely(result)){
         perror("QueueTS_destruct(completion_queue)");
     }
-    int result2 = QueueTS_destruct(self->submission_queue);
+    int result2 = QueueTS_destruct(&self->submission_queue);
     if (unlikely(result2)){
         perror("QueueTS_destruct(submission_queue)");
     }
@@ -642,7 +715,7 @@ typedef struct Result{
     unsigned int command_and_size;
 } Result;
 
-int post_login(const char* login, const char* password, sqlite3* bd){
+int post_login(const char* login, const char* password, sqlite3* db){
     char hash[crypto_pwhash_STRBYTES];
     int status = crypto_pwhash_str(
         hash, password, strlen(password),
@@ -661,7 +734,7 @@ int post_login(const char* login, const char* password, sqlite3* bd){
         return status;
     }
 
-    status = sqlite3_bind_text(stmt, 1, lgn, -1, SQLITE_TRANSIENT);
+    status = sqlite3_bind_text(stmt, 1, login, -1, SQLITE_TRANSIENT);
     if (status != SQLITE_OK) {
         fprintf(stderr, "sqlite3_bind_text (nick): %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
@@ -684,7 +757,8 @@ int post_login(const char* login, const char* password, sqlite3* bd){
             // послать на клиент информацию о том, что такой логин уже зарегестрирован
             // для этого нужно узнать сокет клиента 
             
-            Result result = {.command_and_size, .id, .payload};
+            // TODO
+            //Result result = {.command_and_size, .id, .payload};
         }
 
         return status;
@@ -695,7 +769,7 @@ int post_login(const char* login, const char* password, sqlite3* bd){
 
     char template[]="INSERT INTO authentication VALUES (%s, %s);";
     char command[1024];
-    snprintf(command, sizeof(command), template, lgn, hash);
+    // snprintf(command, sizeof(command), template, lgn, hash); TODO сделать адекватным
     char *err_msg = NULL;
     status = sqlite3_exec(db, command, NULL, NULL, err_msg);
     if (status){
@@ -721,6 +795,7 @@ int delete_friend_request(int sender, int reciever, sqlite3 *bd){}
 
 int post_friendship(int friend1, int friend2, sqlite3 *bd){}
 int delete_friendship(int friend1, int friend2, sqlite3 *bd){}
+/*
 void do_task(TASK task, struct Queue *task_queue, struct Queue *result_queue){
     switch (((int) (task.id) << 8)+task.command){
 //////////////////// логин пароль
@@ -772,13 +847,13 @@ void do_task(TASK task, struct Queue *task_queue, struct Queue *result_queue){
 
     }
 }
-
+*/
 void* Worker_mainloop(void* args){
     assert(args);
     struct Worker* self = (struct Worker *)args;
     TASK task;
     while(1){
-        int status = QueueTS_wait_and_get(self->completion_queue, &task);
+        int status = QueueTS_wait_and_get(&self->completion_queue, &task);
         if (status == 1){
             // stop_server = true, count = 0
             break;
@@ -809,7 +884,7 @@ void* db_thread_fn(void* args){
             break;
         }
         // task_queue.count > 0
-        TASK task = (TASK*) task_queue.mem + task_queue.shift;
+        TASK task = ((TASK*) task_queue.mem)[task_queue.shift]; // TODO проверить имеет ли смысл
         Queue_shift(&task_queue);
         pthread_mutex_unlock(&queue_mutex);
         
@@ -829,6 +904,7 @@ int enqueue_task(TASK task){
 // LOGIC
 
 int main(){
+    srand((unsigned int)time(NULL));
     // собираю информацию об ошибках в error.log
     if (freopen("error.log", "w", stderr) == NULL){
         perror("freopen failed");
@@ -948,6 +1024,7 @@ int main(){
      * recvfrom(ufd, buf, sizeof(buf), 0, (struct sockaddr*)&cliaddr, &len);
      *
      * */
+    // TODO понять что такое status
     if (status)
         exit(EXIT_FAILURE);
 
