@@ -50,23 +50,57 @@ extern "C" {
 #define FRIENDSINFOSEND 53
 #define FRIENDSINFOSENDERROR 54
 
+// начать конфу
 #define CALLSTART 64
+
+
 #define CALLSTARTERROR 65
 #define CALLSTARTWITH 66
-#define CALLSTARTSEND 67
-#define CALLEND 68
-#define CALLENDERROR 69
-#define CALLEND 70
 
+// Ответ сервера на начало конфы
+#define CALLSTARTSEND 67
+
+// завершить конфу
+#define CALLEND 68
+
+
+#define CALLENDERROR 69
+
+// конфу завершнили
+#define CALLENDSERV 71
+
+
+
+// присоединиться к конфе
 #define CALLJOIN 72
+
+
 #define CALLJOINERROR 73
 
+// Ответ сервера на присоединение к конфе
 #define CALLJOINSEND 75
+
+
 #define CALLLEAVE 76
 #define CALLLEAVEERROR 77
 #define CALLINFO 78
+
+// отправить текущую информацию о состоянии конфы. В нашем случае: к конфе кто-то присоединился
 #define CALLINFOSEND 79
+
+
 #define CALLINFOSENDERROR 80
+
+/*
+CALLSTART
+CALLSTARTSEND
+CALLEND
+CALLENDSERV
+CALLJOIN
+CALLJOINSEND
+CALLINFOSEND
+*/
+
 
 #pragma pack(push, 1)
 struct RegistrationInfo{

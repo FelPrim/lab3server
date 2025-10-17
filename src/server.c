@@ -96,23 +96,24 @@ int socket_configure(int *sock_fd, struct addrinfo *result){
 	return oresult;
 }
 
-// TODO подумать над тем, чтобы хранить буфер в стеке, а не куче
+#define BASIC_SZ 8192
+// TODO подумать над тем, чтобы хранить буфер в куче, а не стеке
 struct Buffer{
-    char *mem;
+    char mem[BASIC_SZ];
     uint32_t size;
     uint32_t seek;
     uint32_t expected_endseek;
     // bool reading_data = expected_end != 0
 };
 
-#define BASIC_SZ 1024
 
 int Buffer_construct(struct Buffer* self){
-    self->mem = malloc(BASIC_SZ);
+    /*self->mem = malloc(BASIC_SZ);
     if (!self->mem){
         perror("malloc");
         return 1;
     }
+        */
     self->size = BASIC_SZ;
     self->seek = 0;
     self->expected_endseek = 0;
@@ -120,7 +121,7 @@ int Buffer_construct(struct Buffer* self){
 }
 
 int Buffer_destruct(struct Buffer* self){
-    free(self->mem);
+    //free(self->mem);
     return 0;
 }
 
@@ -134,6 +135,7 @@ int Buffer_clean(struct Buffer* self){
 // 1 -> Полон
 // 2 -> Переполнен
 int Buffer_write(struct Buffer* self, char *data, uint32_t size){
+    assert(self->seek+size < self->size)/*
     if (unlikely(self->seek+size > self->size)){
         assert(self->size < UINT_MAX/4);
         uint32_t new_size = self->size * 4;
@@ -150,6 +152,7 @@ int Buffer_write(struct Buffer* self, char *data, uint32_t size){
         }
         self->mem = new_mem;
     }
+        */
     memcpy(self->mem+self->seek, data, size);
     self->seek += size;
     if (self->seek == self->expected_endseek)
@@ -275,8 +278,8 @@ int Connections_destruct(struct Connections* self){
 
 // тоже должно быстро определяться. В данном случае по callname.
 typedef struct Call{
-    int *participants; // первый участник - владелец конференции
-    uint32_t size;
+    int participants[64]; // первый участник - владелец конференции
+    //uint32_t size;
     uint32_t count;
     char callname[7]; // key
     UT_hash_handle hh;
@@ -284,13 +287,15 @@ typedef struct Call{
 
 Call *calls = NULL;
 
-int Call_construct(Call* self, uint32_t size){
-    self->size = size;
+int Call_construct(Call* self){//, uint32_t size){
+    /*self->size = size;
     self->participants = calloc(size, sizeof(int));
     if (!self->participants){
     	perror("calloc");
 	return 1;
     }
+    */
+    memset(self->participants, 0, 64*sizeof(int));
     self->count = 0;
     static_assert(RAND_MAX == 2147483647);
     int r = rand();
@@ -303,7 +308,7 @@ int Call_construct(Call* self, uint32_t size){
 }
 
 int Call_destruct(Call* self){
-    free(self->participants);
+    //free(self->participants);
     return 0;
 }
 
@@ -361,23 +366,23 @@ struct User{
 // Аналогично с паролем
 
 // TODO change type
-//typedef int TASK; // не int
+//typedef int Task; // не int
 
 typedef struct Task{
-    void* payload;
     unsigned int size;
     unsigned short id; // id относится к таблице
-    unsigned char command; // всё равно sizeof(TASK) = 16
-} TASK;
+    unsigned char command; // всё равно sizeof(Task) = 16
+    char payload[BASIC_SZ];
+} Task;
 
-
+// Task_construct??? destruct???
 
 // Удаляется самый старый элемент -> очередь 
 // Потенциально неограниченное число элементов -> данные на куче
 struct Queue {
     void* mem; // указатель на память, выделенную под очередь
     uint32_t size; // число, по которому можно понять размер выделенной памяти. Я возьму для этого максимальное число элементов
-    //TASK* first; // указатель на первый элемент
+    //Task* first; // указатель на первый элемент
     uint32_t shift; // first = mem + shift
     uint32_t count; // число элементов.
 };
@@ -391,7 +396,7 @@ int Queue_destruct(struct Queue* self){
     return 0;
 }
 
-int Queue_append(struct Queue* self, TASK elem){
+int Queue_append(struct Queue* self, Task elem){
     assert(self);
     if (unlikely(self->count >= self->size)){
         fprintf(stderr, "%d\n", self->size);
@@ -399,19 +404,19 @@ int Queue_append(struct Queue* self, TASK elem){
         // 4567123
         // 0123456 (uintptr_t) first - (uintptr_t) mem   
         uint32_t new_sz = self->size*2;
-        void* new_mem = malloc(new_sz*sizeof(TASK));
+        void* new_mem = malloc(new_sz*sizeof(Task));
         if (new_mem == NULL){
             perror("[malloc]");
             return EXIT_FAILURE;
         }
         //if (likely(shift != 0)){
         //    // 2345671 - особого случая нет
-        //    memcpy(new_mem, self->first, sizeof(TASK)*(right_part));
-        //    memcpy(new_mem+right_part, mem, sizeof(TASK)*shift);
+        //    memcpy(new_mem, self->first, sizeof(Task)*(right_part));
+        //    memcpy(new_mem+right_part, mem, sizeof(Task)*shift);
         //}
-        memcpy(new_mem, (TASK*)self->mem + self->shift, sizeof(TASK)*right_part);
+        memcpy(new_mem, (Task*)self->mem + self->shift, sizeof(Task)*right_part);
         if (likely(self->shift != 0)){
-            memcpy((TASK*)new_mem+right_part, self->mem, sizeof(TASK)*self->shift);
+            memcpy((Task*)new_mem+right_part, self->mem, sizeof(Task)*self->shift);
         }
         free(self->mem);
         self->mem = new_mem;
@@ -419,7 +424,7 @@ int Queue_append(struct Queue* self, TASK elem){
         self->size = new_sz;
     }
     uint32_t index = (self->shift+self->count)%self->size;
-    ((TASK*) self->mem)[index] = elem;
+    ((Task*) self->mem)[index] = elem;
     self->count++;
     return 0;
 } 
@@ -432,8 +437,8 @@ int Queue_shift(struct Queue* self){
     return 0;
 }
 
-TASK Queue_get(struct Queue* self){
-    TASK elem = *((TASK*)(self->mem)+self->shift);
+Task Queue_get(struct Queue* self){
+    Task elem = *((Task*)(self->mem)+self->shift);
     Queue_shift(self);
     return elem;
 }
@@ -443,7 +448,7 @@ int Queue_construct(struct Queue* self, uint32_t size){
     self->size = size;
     self->shift = 0;
     self->count = 0;
-    self->mem = malloc(self->size*sizeof(TASK));
+    self->mem = malloc(self->size*sizeof(Task));
     if (self->mem == NULL){
         perror("[malloc]");
         return EXIT_FAILURE;
@@ -493,7 +498,7 @@ int QueueTS_destruct(struct QueueTS* self){
     return result | result2;
 }
 
-int QueueTS_append(struct QueueTS* self, TASK elem){
+int QueueTS_append(struct QueueTS* self, Task elem){
     pthread_mutex_lock(&self->mutex);
     int result = Queue_append(&self->queue, elem);
     pthread_cond_signal(&self->not_empty);
@@ -502,7 +507,7 @@ int QueueTS_append(struct QueueTS* self, TASK elem){
 }
 
 // возвращает 1 если stop_server и count = 0
-int QueueTS_wait_and_get(struct QueueTS* self, TASK* result){
+int QueueTS_wait_and_get(struct QueueTS* self, Task* result){
     pthread_mutex_lock(&self->mutex);
     while (self->queue.count == 0 && !stop_requested){
         pthread_cond_wait(&self->not_empty, &self->mutex);
@@ -525,9 +530,9 @@ struct Worker{
 };
 
 typedef struct Result{
-    void* payload; // size от 0 до 2^24-1
     int id; // id относится к клиенту
     unsigned int command_and_size;
+    char payload[BASIC_SZ]; // size от 0 до 2^24-1
 } Result;
 
 inline unsigned char Result_get_command(Result self){
@@ -553,8 +558,8 @@ int Queue_append_result(struct Queue* self, Result elem){
         }
         //if (likely(shift != 0)){
         //    // 2345671 - особого случая нет
-        //    memcpy(new_mem, self->first, sizeof(TASK)*(right_part));
-        //    memcpy(new_mem+right_part, mem, sizeof(TASK)*shift);
+        //    memcpy(new_mem, self->first, sizeof(Task)*(right_part));
+        //    memcpy(new_mem+right_part, mem, sizeof(Task)*shift);
         //}
         memcpy(new_mem, (Result*)self->mem + self->shift, sizeof(Result)*right_part);
         if (likely(self->shift != 0)){
@@ -599,17 +604,17 @@ int QueueTS_wait_and_get_result(struct QueueTS* self, Result* result){
     return 0;
 }
 
-#define TASKS_STARTINGSIZE 32
+#define TaskS_STARTINGSIZE 32
 
 // epfd - дескриптор, задающий "центр асинхронности"
 // event_fd - счётчик. Можно из одного потока увеличить значение счётчика, и тогда epoll заметит что произошел EPOLLIN
 int Worker_construct(struct Worker* self, int *epfd, int *event_fd){
-    int result = QueueTS_construct(&self->completion_queue, TASKS_STARTINGSIZE);
+    int result = QueueTS_construct(&self->completion_queue, TaskS_STARTINGSIZE);
     if (unlikely(result)){
         perror("completion_queue construct");
         return result;
     }
-    result = QueueTS_construct(&self->submission_queue, TASKS_STARTINGSIZE);
+    result = QueueTS_construct(&self->submission_queue, TaskS_STARTINGSIZE);
     if (unlikely(result)){
         perror("submission_queue construct");
         QueueTS_destruct(&self->completion_queue);
@@ -694,8 +699,8 @@ typedef struct Task{
     void* payload;
     unsigned int size;
     unsigned short id; // id относится к таблице
-    unsigned char command; // всё равно sizeof(TASK) = 16
-} TASK;
+    unsigned char command; // всё равно sizeof(Task) = 16
+} Task;
 
 // Добавлять / изменять / удалять - 2 бита
 // id БД. Базы данных:
@@ -827,7 +832,7 @@ int delete_friend_request(int sender, int reciever, sqlite3 *bd){}
 int post_friendship(int friend1, int friend2, sqlite3 *bd){}
 int delete_friendship(int friend1, int friend2, sqlite3 *bd){}
 /*
-void do_task(TASK task, struct Queue *task_queue, struct Queue *result_queue){
+void do_task(Task task, struct Queue *task_queue, struct Queue *result_queue){
     switch (((int) (task.id) << 8)+task.command){
 //////////////////// логин пароль
         case 0:
@@ -882,7 +887,7 @@ void do_task(TASK task, struct Queue *task_queue, struct Queue *result_queue){
 void* Worker_mainloop(void* args){
     assert(args);
     struct Worker* self = (struct Worker *)args;
-    TASK task;
+    Task task;
     while(1){
         int status = QueueTS_wait_and_get(&self->completion_queue, &task);
         if (status == 1){
@@ -915,7 +920,7 @@ void* db_thread_fn(void* args){
             break;
         }
         // task_queue.count > 0
-        TASK task = ((TASK*) task_queue.mem)[task_queue.shift]; // TODO проверить имеет ли смысл
+        Task task = ((Task*) task_queue.mem)[task_queue.shift]; // TODO проверить имеет ли смысл
         Queue_shift(&task_queue);
         pthread_mutex_unlock(&queue_mutex);
         
@@ -923,7 +928,7 @@ void* db_thread_fn(void* args){
     }
 }
 
-int enqueue_task(TASK task){
+int enqueue_task(Task task){
     pthread_mutex_lock(&queue_mutex);
     int status = Queue_append(&task_queue, task);
     pthread_cond_signal(&queue_cond);
