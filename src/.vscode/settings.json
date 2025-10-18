@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "xutility": "c",
+        "queue": "c",
+        "stack": "c",
+        "random": "c",
+        "types.h": "c",
+        "uthash.h": "c"
+    }
+}

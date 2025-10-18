@@ -59,7 +59,7 @@ void calling_reload(int signo){
 #define TPSTR "23230"
 #define UPSTR "23231"
 
-int socket_configure(int *sock_fd, struct addrinfo *result){
+inline static int socket_configure(int *sock_fd, struct addrinfo *result){
     struct addrinfo *p;
     int oresult = 0;
     for (p = result; p != NULL; p=p->ai_next){
@@ -100,21 +100,21 @@ int socket_configure(int *sock_fd, struct addrinfo *result){
 // TODO подумать над тем, чтобы хранить буфер в куче, а не стеке
 struct Buffer{
     char mem[BASIC_SZ];
-    uint32_t size;
+   // uint32_t size;
     uint32_t seek;
     uint32_t expected_endseek;
     // bool reading_data = expected_end != 0
 };
 
 // TODO добавить везде где можно static inline
-static inline int Buffer_construct(struct Buffer* self){
+inline static int Buffer_construct(struct Buffer* self){
     /*self->mem = malloc(BASIC_SZ);
     if (!self->mem){
         perror("malloc");
         return 1;
     }
         */
-    self->size = BASIC_SZ;
+  //  self->size = BASIC_SZ;
     self->seek = 0;
     self->expected_endseek = 0;
     return 0;
@@ -125,7 +125,7 @@ int Buffer_destruct(struct Buffer* self){
     return 0;
 }
 
-int Buffer_clean(struct Buffer* self){
+inline static int Buffer_clean(struct Buffer* self){
     self->seek = 0;
     self->expected_endseek = 0;
 }
@@ -134,8 +134,8 @@ int Buffer_clean(struct Buffer* self){
 // 0 -> ждёт ещё
 // 1 -> Полон
 // 2 -> Переполнен
-int Buffer_write(struct Buffer* self, char *data, uint32_t size){
-    assert(self->seek+size < self->size)/*
+inline static int Buffer_write(struct Buffer* self, char *data, uint32_t size){
+   // assert(self->seek+size < self->size)/*
     if (unlikely(self->seek+size > self->size)){
         assert(self->size < UINT_MAX/4);
         uint32_t new_size = self->size * 4;
@@ -153,6 +153,7 @@ int Buffer_write(struct Buffer* self, char *data, uint32_t size){
         self->mem = new_mem;
     }
         */
+    assert(size < BASIC_SZ);
     memcpy(self->mem+self->seek, data, size);
     self->seek += size;
     if (self->seek == self->expected_endseek)
@@ -168,29 +169,32 @@ typedef struct Connection{
     struct sockaddr_in udp_addr; 
     SSL *ssl;
     int client_fd; // key
-    int client_id; 
+    //int client_id; 
     UT_hash_handle hh;
 } Connection;
 
 Connection *connections = NULL;
 
-int Connection_construct(Connection* self){
+inline static int Connection_construct(Connection* self){
     self->ssl = NULL;
+    self->client_fd = 0;
     return Buffer_construct(&self->buffer);
     // TODO обмозговать
 }
 
-int Connection_destruct(Connection* self){
+inline static int Connection_destruct(Connection* self){
     if (self->ssl)
         SSL_free(self->ssl);
+    if (self->client_fd)
+        close(self->client_fd);
     return Buffer_destruct(&self->buffer);
 }
 
-void Connection_add(Connection* elem){
+inline static void Connection_add(Connection* elem){
 	HASH_ADD_INT(connections, client_fd, elem);
 }
 
-Connection* Connection_find(int client_fd){
+inline static Connection* Connection_find(int client_fd){
 	Connection* result;
 	HASH_FIND_INT(connections, &client_fd, result);
 	return result;
@@ -282,6 +286,7 @@ typedef struct Call{
     //uint32_t size;
     uint32_t count;
     char callname[7]; // key
+    // шифр
     UT_hash_handle hh;
 } Call;
 
@@ -954,49 +959,138 @@ int enqueue_task(Task task){
 */
 //////////////////////////////////////////////////
 // LOGIC
-*/
+//*/
+
+static int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return -1;
+    return 0;
+}
+
+static inline void tune_tcp_socket(int fd) {
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+}
+
+
+
 // TODO
 // эта структура хранит информацию, которая используется в main
-struct MainInfo{
-	
+struct MainState{
+	SSL_CTX* ssl_ctx;
+    int epfd;
+    int tfd;
+    int ufd;
+    struct epoll_event ev;
+    struct epoll_event events[MAX_EVENTS];
 };
 
-// TODO добавить названия для процедур до начала цикла. Типа SSL_init, Socket_init и тд
+inline static void MainState_construct(struct MainState* state){
+    state->ssl_ctx = NULL;
+    state->epfd = 0;
+    state->tfd = 0;
+    state->ufd = 0;
 
-int main(){
+}
+
+inline static void MainState_destruct(struct MainState* state){
+    if (state->ssl_ctx) {
+        SSL_CTX_free(state->ssl_ctx);
+        state->ssl_ctx = NULL;
+    }
+    if (state->tfd)
+        close(state->tfd);
+    if (state->ufd)
+        close(state->ufd);
+}
+
+inline static int simple_starting_actions(){
     srand((unsigned int)time(NULL));
     // собираю информацию об ошибках в error.log
     if (freopen("error.log", "w", stderr) == NULL){
         perror("freopen failed");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
     if (setvbuf(stderr, NULL, _IOLBF, 0) != 0) {
         perror("setvbuf failed");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
-
-    // кастомизирую обработку сигналов
+    
     signal(SIGINT, calling_stop);
     signal(SIGTERM, calling_stop);
     signal(SIGHUP, calling_reload);
-    // игнорирую сигнал связанный с записью в закрытый другой стороной сокет
-    // signal(SIGPIPE, SIG_IGN);
-    
-	/*
-    if (sodium_init() < 0) {
-        perror("sodium");
-        exit(EXIT_FAILURE);
+}
+
+inline static int init_ssl_ctx(struct MainState* state) {
+    // 1. Инициализация OpenSSL (в современных версиях часто не требуется явно)
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+
+    // 2. Создаём контекст TLS-сервера (универсальный метод, поддерживает TLS 1.2/1.3)
+    state->ssl_ctx = SSL_CTX_new(TLS_server_method());
+    if (!state.ssl_ctx) {
+        fprintf(stderr, "SSL_CTX_new failed\n");
+        ERR_print_errors_fp(stderr);
+        return -1;
     }
-    */
 
+    // 3. Задаём минимально допустимую версию TLS (рекомендуется >= 1.2)
+    SSL_CTX_set_min_proto_version(state->ssl_ctx, TLS1_2_VERSION);
+    // (можно ограничить максимум TLS 1.3, если есть несовместимость)
+    // SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
 
-// TODO наверное, goto стоит заменить на функцию...
-    SERVER_START:
-    stop_requested = false;
-    reload_requested = false;
-    // TCP и UDP сокеты
-    int tfd = 0, ufd = 0;
-    {
+    // 4. Загружаем сертификат и приватный ключ
+    if (SSL_CTX_use_certificate_file(state->ssl_ctx, "/etc/letsencrypt/live/marrs73.ru/fullchain.pem", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        goto fail;
+    }
+    if (SSL_CTX_use_PrivateKey_file(state->ssl_ctx, "/etc/letsencrypt/live/marrs73.ru/privkey.pem", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        goto fail;
+    }
+
+    // Проверяем, что ключ соответствует сертификату
+    if (!SSL_CTX_check_private_key(state->ssl_ctx)) {
+        fprintf(stderr, "Private key does not match the certificate\n");
+        goto fail;
+    }
+
+    // 5. Настройки шифров (cipher suites)
+    // — современный безопасный набор; можно адаптировать при необходимости
+    if (!SSL_CTX_set_cipher_list(state->ssl_ctx, "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")) {
+        fprintf(stderr, "Failed to set cipher list\n");
+        goto fail;
+    }
+
+    // 6. (опционально) запретить старые протоколы / компрессию / слабые шифры
+    SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_COMPRESSION);
+    SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+
+    // 7. (опционально) можно включить сессионный кэш, если сервер долгоживущий
+    SSL_CTX_set_session_cache_mode(state->ssl_ctx, SSL_SESS_CACHE_SERVER);
+
+    fprintf(stderr, "SSL_CTX initialized successfully.\n");
+    return 0;
+
+fail:
+    if (state->ssl_ctx) {
+        SSL_CTX_free(state->ssl_ctx);
+        state->ssl_ctx = NULL;
+    }
+    return -1;
+}
+
+inline static void cleanup_ssl_ctx() {
+    EVP_cleanup();              
+    ERR_free_strings();         
+    CRYPTO_cleanup_all_ex_data();
+}
+
+inline static int tcp_socket_configuration(int* tfd){
+    *tfd = 0;
     struct addrinfo hints;
     struct addrinfo *result;
     memset(&hints, 0, sizeof(hints));
@@ -1009,21 +1103,24 @@ int main(){
     int status = getaddrinfo(NULL, TPSTR, &hints, &result);
     if (status){
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
-    status = socket_configure(&tfd, result);
+    status = socket_configure(tfd, result);
     if (status){
-	if (tfd)
-		close(tfd);
-        exit(EXIT_FAILURE);
+	    if (*tfd)
+		    close(*tfd);
+        return EXIT_FAILURE;
     }
-    }
-    if (listen(tfd, SOMAXCONN) < 0){
+    if (listen(*tfd, SOMAXCONN) < 0){
         perror("listen");
-	close(tfd);
-	exit(EXIT_FAILURE);
+	    close(*tfd);
+	    return EXIT_FAILURE;
     }
-    {
+    return 0;
+}
+
+inline static int udp_socket_configuration(int* ufd){
+    *ufd = 0;
     struct addrinfo hints;
     struct addrinfo *result;
     memset(&hints, 0, sizeof(hints));
@@ -1036,35 +1133,96 @@ int main(){
     int status =  getaddrinfo(NULL, UPSTR, &hints, &result);
     if (status){
     	fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-	close(tfd);
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
     
-    status = socket_configure(&ufd, result);
+    status = socket_configure(ufd, result);
     if (status){
-    	close(tfd);
-	if (ufd)
-		close(ufd);
-	exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
-    }
-    // epoll дескриптор - управляет обновлениями состояний, указанных с помощью epoll_ctl(... EPOLL_CTL_ADD ...) дескрипторов
-    // нужно для асинхронности
-    int epfd = epoll_create1(0);
-    if (epfd == -1){
+    return 0;
+}
+
+inline static int epfd_configuration(struct MainState* state){
+    state->epfd = epoll_create1(0);
+    if (state->epfd == -1){
     	perror("epoll_create1");
-	exit(EXIT_FAILURE);
+	    return -1;
     }
 
-    // ev - временная переменная, events - хранят информацию о событиях
-    struct epoll_event ev, events[MAX_EVENTS];
-    ev.events = EPOLLIN; // событие - ввод. EPOLLOUT - вывод, EPOLLRDHUP - отсоединение
-    ev.data.fd = tfd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &ev);
+    state->ev.events = EPOLLIN; // событие - ввод. EPOLLOUT - вывод, EPOLLRDHUP - отсоединение
+    state->ev.data.fd = state->tfd;
+    epoll_ctl(state->epfd, EPOLL_CTL_ADD, state->tfd, &state->ev);
     
-    ev.events = EPOLLIN;
-    ev.data.fd = ufd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, ufd, &ev);
+    state->ev.events = EPOLLIN;
+    state->ev.data.fd = state->ufd;
+    epoll_ctl(state->epfd, EPOLL_CTL_ADD, state->ufd, &state->ev);
+    return 0;
+}
+
+
+inline static void handle_udp_packet(int ufd){
+
+}
+
+inline static void handle_listen(int tfd){
+
+}
+
+inline static void handle_client(int fd){
+
+}
+/*
+typedef void (*Handler)(struct MainState*, int);
+
+static void handle_tcp(struct MainState* state, int tfd){
+    const Handler tcp_handlers[2] = {handle_listen, handle_client};
+    tcp_handlers[tfd != state->tfd](state, tfd);
+}
+
+const Handler packet_handlers[2] = {handle_udp_packet, handle_tcp};
+    while (!stop_requested){
+	    int n = epoll_wait(state.epfd, state.events, MAX_EVENTS, -1);
+	    for (int i = 0; i < n; ++i){
+	    	int fd = events[i].data.fd;
+            packet_handlers[fd != state->ufd](state, fd);
+	    }
+    }
+*/
+int main(){
+    struct MainState state;
+    MainState_construct(&state);
+    int status = 0;
+    if (status = simple_starting_actions())
+        goto State_destruct;
+    if (status = init_ssl_ctx(&state))
+        goto State_destruct;
+    if (status = tcp_socket_configuration(&state.tfd))
+        goto SSL_cleanup;
+    if (status = udp_socket_configuration(&state.ufd))
+        goto SSL_cleanup;
+    if (status = epfd_configuration(&state))
+        goto SSL_cleanup;
+
+    {
+
+    // кастомизирую обработку сигналов
+    // игнорирую сигнал связанный с записью в закрытый другой стороной сокет
+    // signal(SIGPIPE, SIG_IGN);
+    
+	/*
+    if (sodium_init() < 0) {
+        perror("sodium");
+        exit(EXIT_FAILURE);
+    }
+    */
+
+
+// TODO наверное, goto стоит заменить на функцию...
+    
+    // epoll дескриптор - управляет обновлениями состояний, указанных с помощью epoll_ctl(... EPOLL_CTL_ADD ...) дескрипторов
+    // нужно для асинхронности
+
 
     // Когда к нам подсоединяется новый клиент, он тоже добавляется к epfd. Кроме EPOLLIN он может в EPOLLRDHUP
     // Когда отсоединяется - удаляется.
@@ -1087,18 +1245,19 @@ int main(){
      *
      * */
     // TODO понять что такое status
-    if (status)
-        exit(EXIT_FAILURE);
+    //if (status)
+    //    exit(EXIT_FAILURE);
 
 
-    pthread_t db_thread;
+    //pthread_t db_thread;
     // дескриптор, атрибуты (default), указатели на: функцию, параметры
-    int thread_status = pthread_create(&db_thread, NULL, db_thread_fn, NULL);
+    /*int thread_status = pthread_create(&db_thread, NULL, db_thread_fn, NULL);
     if (thread_status != 0){
         fprintf(stderr, "pthread_create, status=%d\n", thread_status);
         perror("pthread_create");
         exit(EXIT_FAILURE);
     }
+        */
     // db_thread_fn работает
 
     while (!stop_requested){
@@ -1114,31 +1273,41 @@ int main(){
 		    * */
 		    if (likely(fd == ufd)){
 		    	// Пересылаем
+                handle_udp_packet(ufd);
 		    }
 		    else if (fd == tfd){
 			    // Думаем
+                handle_listen(tfd);
 		    }
 		    else {
 		    	// fd = client_fd
+                handle_client(fd);
 		    }
 	    }
     }
     
     // завершение работы
+    /*
     pthread_mutex_lock(&queue_mutex);
     stop_requested = true;
     pthread_cond_signal(&queue_cond);
     pthread_mutex_unlock(&queue_mutex);
 
     pthread_join(db_thread, NULL);
-
+    */
     if (reload_requested)
         goto SERVER_START;
     
     SERVER_END:
-    Queue_destruct(&task_queue);
+    //Queue_destruct(&task_queue);
+    cleanup_ssl_ctx(&state);
     close(tfd);
     close(ufd);
+}
 
-    return 0;
+SSL_cleanup:
+    cleanup_ssl_ctx();
+State_destruct:
+    MainState_destruct(&state);
+    return status;
 }
