@@ -5,6 +5,8 @@
         "stack": "c",
         "random": "c",
         "types.h": "c",
-        "uthash.h": "c"
+        "uthash.h": "c",
+        "evp.h": "c",
+        "err.h": "c"
     }
 }

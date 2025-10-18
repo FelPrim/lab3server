@@ -28,8 +28,11 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 #include "uthash.h"
 
+#define IS_SERVER
 #include "protocol.h"
 
 #define likely(x) __builtin_expect(!!(x), 1)
@@ -241,19 +244,16 @@ inline static void Connection_delete(Connection* connection){
 
 #define CALL_MAXSZ 64
 #define CALL_NAME_SZ 7
-#define SYMM_KEY_LEN 32
 
 typedef struct Call{
     int participants[CALL_MAXSZ]; // первый участник - владелец конференции
     uint32_t count;
     char callname[CALL_NAME_SZ]; // key
     unsigned char symm_key[SYMM_KEY_LEN]; 
-    uint8_t key_len;
     UT_hash_handle hh;
 } Call;
 
 Call *calls = NULL;
-
 
 inline static int Call_construct(Call* self){
     memset(self->participants, 0, CALL_MAXSZ*sizeof(int));
@@ -262,19 +262,17 @@ inline static int Call_construct(Call* self){
     int r = rand();
     for (int i = 0; i < 6; ++i){
     	self->callname[i] = r%26+'A';
-	r /= 26;
+	    r /= 26;
     }
     self->callname[6] = '\0';    
     self->callname[CALL_NAME_SZ-1] = '\0';
-    self->key_len = 0;
+    RAND_bytes(self->symm_key, sizeof(self->symm_key));
+    RAND_bytes(self->iv, sizeof(self->iv));
+    //self->key_len = 0;
     return 0;
 }
 
 inline static int Call_destruct(Call* self){
-    if (self->key_len) {
-        OPENSSL_cleanse(self->symm_key, self->key_len);
-        self->key_len = 0;
-    }
     return 0;
 }
 
@@ -466,21 +464,6 @@ inline static int epfd_configuration(struct MainState* state){
     return 0;
 }
 
-int buffer_ssl_read(Connection *c, size_t len) {
-    while (c->buffer.size < len) {
-        int n = SSL_read(c->ssl,
-                         c->buffer.mem + c->buffer.size,
-                         BASIC_SZ - c->buffer.size);
-        if (n <= 0) {
-            int err = SSL_get_error(c->ssl, n);
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
-                return 0; // пока недостаточно данных, ждём следующего epoll
-            return -1; // ошибка или закрытие
-        }
-        c->buffer.size += n;
-    }
-    return 1; // получили хотя бы len байт
-}
 
 
 inline static void handle_callstart_server(struct MainState *state, Connection *c){
@@ -734,7 +717,7 @@ int main(){
     while (!stop_requested){
 	    int n = epoll_wait(state.epfd, state.events, MAX_EVENTS, -1);
 	    for (int i = 0; i < n; ++i){
-	    	int fd = events[i].data.fd;
+	    	int fd = state.events[i].data.fd;
 		    if (likely(fd == state.ufd))
                 handle_udp_packet(&state);
 		    else if (unlikely(fd == state.tfd))

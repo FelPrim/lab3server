@@ -1,5 +1,7 @@
 #pragma once
 
+#define IS_SERVER
+
 #ifdef __cpluscplus
 extern "C" {
 #endif
@@ -28,7 +30,14 @@ extern "C" {
 
 
 
+#define SYMM_KEY_LEN 32
 
+int encrypt(unsigned char *plaintext, int plaintext_len,
+unsigned char *key, unsigned char *ciphertext);
+
+
+int decrypt(unsigned char *ciphertext, int ciphertext_len, 
+            unsigned char *key, unsigned char *plaintext);
 
 #ifdef __cplusplus
 }
