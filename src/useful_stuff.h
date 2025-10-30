@@ -1,13 +1,27 @@
-#pragma once
+#ifndef USEFUL_STUFF_H
+#define USEFUL_STUFF_H
 
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+#include <sys/epoll.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 
-#ifndef EPFD_IS_DEFINED
-#define EPFD_IS_DEFINED
-int epfd;
-#endif
+// Макросы для подсказок ветвления
+#define likely(x)       __builtin_expect(!!(x), 1)
+#define unlikely(x)     __builtin_expect(!!(x), 0)
 
-#define IS_COMPLETED 0
-#define ISNT_COMPLETED 1
-#define CAUGHT_ERROR -1
+// Статусы операций
+#define IS_COMPLETED    0
+#define ISNT_COMPLETED  1
+#define CAUGHT_ERROR   -1
+
+// Флаги для epoll
+#define UNINITIALIZED   0
+#define RECVING         (EPOLLIN | EPOLLRDHUP)
+#define SENDING         (EPOLLIN | EPOLLRDHUP | EPOLLOUT)
+
+// Внешние объявления глобальных переменных
+extern int epfd;
+extern int tfd;
+extern int ufd;
+
+#endif // USEFUL_STUFF_H
