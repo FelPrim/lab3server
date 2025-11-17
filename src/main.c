@@ -82,10 +82,16 @@ void handle_client_read(int epoll_fd, Connection* conn) {
     int result = connection_read_data(conn);
     
     if (result > 0) {
-        // Успешно прочитаны данные, обрабатываем сообщения
         Buffer* read_buf = &conn->read_buffer;
         
-        // Используем ваш buffer_protocol_state для проверки полных сообщений
+        // ОТЛАДОЧНЫЙ ВЫВОД: покажем что получили
+        printf("DEBUG: Received %d bytes, buffer position: %u, expected_size: %u\n",
+               result, read_buf->position, read_buf->expected_size);
+        
+        if (read_buf->position > 0) {
+            printf("DEBUG: First byte (message type): 0x%02x\n", read_buf->data[0]);
+        }
+        
         while (buffer_protocol_state(read_buf) == BUFFER_IS_COMPLETE) {
             uint8_t message_type = read_buf->data[0];
             size_t payload_len = read_buf->expected_size - 1;
@@ -94,13 +100,17 @@ void handle_client_read(int epoll_fd, Connection* conn) {
             printf("Processing message from fd=%d: type=0x%02x, len=%zu\n", 
                    conn->fd, message_type, payload_len);
             
-            // Обрабатываем сообщение
+            // ОТЛАДОЧНЫЙ ВЫВОД для CLIENT_UDP_ADDR
+            if (message_type == CLIENT_UDP_ADDR && payload_len >= sizeof(UDPAddrFullPayload)) {
+                const UDPAddrFullPayload* udp_payload = (const UDPAddrFullPayload*)payload;
+                printf("DEBUG: CLIENT_UDP_ADDR payload - family: 0x%04x, port: %u, ip: 0x%08x\n",
+                       udp_payload->family, ntohs(udp_payload->port), ntohl(udp_payload->ip));
+            }
+            
             handle_client_message(conn, message_type, payload, payload_len);
             
-            // Используем ваш buffer_protocol_consume для очистки обработанного сообщения
             buffer_protocol_consume(read_buf);
             
-            // Устанавливаем expected_size для следующего сообщения
             if (read_buf->position > 0) {
                 buffer_protocol_set_expected(read_buf);
             }
@@ -121,13 +131,24 @@ void handle_client_read(int epoll_fd, Connection* conn) {
 }
 
 void handle_client_write(Connection* conn) {
-    int result = connection_write_data(conn);
     
-    if (result == 1) {
-        // Все данные записаны - убираем EPOLLOUT
-        if (buffer_get_data_size(&conn->write_buffer) == 0) {
-            epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLET);
+    // Пытаемся отправить данные из буфера записи
+    if (buffer_get_data_size(&conn->write_buffer) > 0) {
+        int result = connection_write_data(conn);
+        
+        if (result == 1) {
+            // Все данные записаны
+            printf("All data written to client: fd=%d\n", conn->fd);
+        } else if (result == -1) {
+            // Ошибка записи
+            printf("Error writing to client: fd=%d\n", conn->fd);
         }
+        // result == -2 означает EAGAIN/EWOULDBLOCK - продолжаем позже
+    }
+    
+    // Убираем EPOLLOUT из мониторинга если буфер записи пуст
+    if (buffer_get_data_size(&conn->write_buffer) == 0) {
+        epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLET);
     }
 }
 
