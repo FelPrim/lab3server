@@ -134,7 +134,7 @@ uint32_t stream_generate_id(void) {
     
     uint32_t id;
     do {
-        id = (uint32_t)rand();
+        id = (uint32_t)rand()%308915775;
     } while (stream_find_by_id(id) != NULL && id != 0);
     
     return id;

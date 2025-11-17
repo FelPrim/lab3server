@@ -259,18 +259,16 @@ void send_stream_created(Connection* conn, const Stream* stream) {
            message[0], ntohl(payload.stream_id));
     
     // Отправляем сообщение
-    int result = connection_send_message(conn, message, sizeof(message));
-    printf("DEBUG: connection_send_message result: %d\n", result);
+    connection_send_message(conn, message, sizeof(message));
     
-    // НЕМЕДЛЕННО пытаемся отправить данные
+    // НЕМЕДЛЕННАЯ отправка данных
+    printf("DEBUG: Immediate flush for fd=%d\n", conn->fd);
+    connection_write_data(conn);
+    
+    // Принудительно добавляем EPOLLOUT если есть данные
     if (conn->write_buffer.position > 0) {
-        printf("DEBUG: Data in write buffer, forcing flush\n");
-        connection_write_data(conn);
-        
-        // Если все еще есть данные, добавляем EPOLLOUT для мониторинга
-        if (conn->write_buffer.position > 0) {
-            epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLOUT | EPOLLET);
-        }
+        printf("DEBUG: Still data in buffer, adding EPOLLOUT for fd=%d\n", conn->fd);
+        epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLOUT | EPOLLET);
     }
 }
 
