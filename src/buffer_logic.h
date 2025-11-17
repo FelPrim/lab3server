@@ -30,3 +30,5 @@ BufferResult buffer_protocol_state(const Buffer* buf);
 
 /* Очищает сообщение, если оно полностью прочитано. */
 void buffer_protocol_consume(Buffer* buf);
+// Добавьте в конец buffer_logic.h
+size_t buffer_get_data_size(Buffer* buf);

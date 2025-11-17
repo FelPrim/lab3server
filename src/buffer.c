@@ -22,65 +22,85 @@ int buffer_reserve(Buffer* buf, uint32_t n) {
 }
 
 BufferResult buffer_write(Buffer* restrict dest, const void* restrict src, uint32_t n) {
-    assert(dest);
-    assert(src);
+    if (!dest) return BUFFER_MEMORY_OVERFLOW;
 
-    /* Проверяем на переполнение памяти */
-    if (dest->position + n > BUFFER_SIZE)
+    if (n == 0) {
+        if (dest->expected_size > 0 && dest->position == dest->expected_size)
+            return BUFFER_IS_COMPLETE;
+        if (dest->expected_size > 0 && dest->position < dest->expected_size)
+            return BUFFER_IS_INCOMPLETE;
+        return BUFFER_IS_INCOMPLETE;
+    }
+
+    if ((uint64_t)dest->position + (uint64_t)n > (uint64_t)BUFFER_SIZE) {
         return BUFFER_MEMORY_OVERFLOW;
+    }
+
+    if (dest->expected_size > 0) {
+        uint32_t allowed = (dest->expected_size > dest->position) ? (dest->expected_size - dest->position) : 0;
+        if (n > allowed) {
+            return BUFFER_OVERFLOW;
+        }
+
+        memcpy(dest->data + dest->position, src, n);
+        dest->position += n;
+        if (dest->position == dest->expected_size) return BUFFER_IS_COMPLETE;
+        return BUFFER_IS_INCOMPLETE;
+    }
 
     memcpy(dest->data + dest->position, src, n);
     dest->position += n;
-
-    /* Проверка на переполнение логического размера */
-    if (dest->expected_size > 0 && dest->position > dest->expected_size)
-        return BUFFER_OVERFLOW;
-
-    /* Проверка на завершённость */
-    if (dest->expected_size > 0 && dest->position == dest->expected_size)
-        return BUFFER_IS_COMPLETE;
-
     return BUFFER_IS_INCOMPLETE;
 }
 
 BufferResult buffer_read(Buffer* restrict src, void* restrict dest, uint32_t n) {
-    assert(src);
-    assert(dest);
+    if (!src || (!dest && n > 0)) 
+        return BUFFER_MEMORY_OVERFLOW;
 
-    /* Если буфер пуст */
-    if (src->position == 0)
+    if (n == 0) 
+        return buffer_state(src);
+
+    if (src->position == 0) 
         return BUFFER_IS_INCOMPLETE;
 
-    /* Сколько реально можно прочитать */
-    uint32_t to_read = n;
-    if (to_read > src->position)
-        to_read = src->position;
-
-    /* Если задан expected_size, не читаем больше него */
-    if (src->expected_size > 0 && to_read > src->expected_size)
-        to_read = src->expected_size;
-
-    memcpy(dest, src->data, to_read);
-
-    /* Сдвигаем оставшиеся данные */
-    memmove(src->data, src->data + to_read, src->position - to_read);
-    src->position -= to_read;
-
-    /* Проверка логического состояния */
-    if (src->expected_size > 0 && src->position > src->expected_size)
+    // Проверяем логическое переполнение (если expected_size задан)
+    if (src->expected_size > 0 && n > src->expected_size) {
         return BUFFER_OVERFLOW;
+    }
 
-    if (src->expected_size > 0 && src->position == src->expected_size)
-        return BUFFER_IS_COMPLETE;
+    // Проверяем, не пытаемся ли прочитать больше чем есть
+    if (n > src->position) {
+        return BUFFER_OVERFLOW;
+    }
 
-    return BUFFER_IS_INCOMPLETE;
+    // Копируем данные
+    memcpy(dest, src->data, n);
+
+    // Сдвигаем оставшиеся данные
+    uint32_t remaining = src->position - n;
+    if (remaining > 0) {
+        memmove(src->data, src->data + n, remaining);
+    }
+    
+    src->position = remaining;
+
+    // Обновляем expected_size - это важно!
+    if (src->expected_size > 0) {
+        if (n >= src->expected_size) {
+            src->expected_size = 0;
+        } else {
+            src->expected_size -= n;
+        }
+    }
+
+    return buffer_state(src);
 }
 
 BufferResult buffer_state(const Buffer* buf) {
     assert(buf);
 
     if (buf->expected_size == 0)
-        return BUFFER_IS_INCOMPLETE; // не задано, значит неполный
+        return BUFFER_IS_INCOMPLETE;
 
     if (buf->position < buf->expected_size)
         return BUFFER_IS_INCOMPLETE;

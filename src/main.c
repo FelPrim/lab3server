@@ -9,8 +9,8 @@
 #include <arpa/inet.h>
 #include "network.h"
 #include "connection.h"
-#include "handlers.h"
 #include "protocol.h"
+#include "buffer_logic.h"  // Добавлено для функций buffer_protocol_*
 
 #define MAX_EVENTS 64
 #define BUFFER_READ_SIZE 4096
@@ -85,7 +85,8 @@ void handle_client_read(int epoll_fd, Connection* conn) {
         // Успешно прочитаны данные, обрабатываем сообщения
         Buffer* read_buf = &conn->read_buffer;
         
-        while (buffer_has_complete_message(read_buf)) {
+        // Используем ваш buffer_protocol_state для проверки полных сообщений
+        while (buffer_protocol_state(read_buf) == BUFFER_IS_COMPLETE) {
             uint8_t message_type = read_buf->data[0];
             size_t payload_len = read_buf->expected_size - 1;
             const uint8_t* payload = payload_len > 0 ? read_buf->data + 1 : NULL;
@@ -96,8 +97,13 @@ void handle_client_read(int epoll_fd, Connection* conn) {
             // Обрабатываем сообщение
             handle_client_message(conn, message_type, payload, payload_len);
             
-            // Удаляем обработанное сообщение из буфера
-            buffer_consume(read_buf, read_buf->expected_size);
+            // Используем ваш buffer_protocol_consume для очистки обработанного сообщения
+            buffer_protocol_consume(read_buf);
+            
+            // Устанавливаем expected_size для следующего сообщения
+            if (read_buf->position > 0) {
+                buffer_protocol_set_expected(read_buf);
+            }
         }
     } else if (result == 0) {
         // Соединение закрыто клиентом
@@ -112,27 +118,16 @@ void handle_client_read(int epoll_fd, Connection* conn) {
         epoll_remove(epoll_fd, conn->fd);
         connection_remove(conn->fd);
     }
-    // result == -2 означает EAGAIN/EWOULDBLOCK - продолжаем
 }
 
 void handle_client_write(Connection* conn) {
-    // Пытаемся отправить данные из буфера записи
-    if (buffer_get_data_size(&conn->write_buffer) > 0) {
-        int result = connection_write_data(conn);
-        
-        if (result == 1) {
-            // Все данные записаны
-            printf("All data written to client: fd=%d\n", conn->fd);
-        } else if (result == -1) {
-            // Ошибка записи
-            printf("Error writing to client: fd=%d\n", conn->fd);
-        }
-        // result == -2 означает EAGAIN/EWOULDBLOCK - продолжаем позже
-    }
+    int result = connection_write_data(conn);
     
-    // Убираем EPOLLOUT из мониторинга если буфер записи пуст
-    if (buffer_get_data_size(&conn->write_buffer) == 0) {
-        epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLET);
+    if (result == 1) {
+        // Все данные записаны - убираем EPOLLOUT
+        if (buffer_get_data_size(&conn->write_buffer) == 0) {
+            epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLET);
+        }
     }
 }
 
@@ -177,14 +172,14 @@ int initialize_servers(void) {
     printf("Initializing servers...\n");
     
     // Создаем TCP сервер
-    g_tcp_fd = create_tcp_server(23230);
+    g_tcp_fd = create_tcp_server(23231);
     if (g_tcp_fd < 0) {
         fprintf(stderr, "Failed to create TCP server\n");
         return -1;
     }
     
     // Создаем UDP сервер  
-    g_udp_fd = create_udp_server(23231);
+    g_udp_fd = create_udp_server(23230);
     if (g_udp_fd < 0) {
         fprintf(stderr, "Failed to create UDP server\n");
         close(g_tcp_fd);

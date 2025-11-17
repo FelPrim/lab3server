@@ -3,8 +3,9 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include "connection.h"
-#include "handlers.h"
+#include "connection_logic.h"  // Добавлено для connection_detach_from_streams и connection_delete_owned_streams
 #include "stream.h"
+#include "stream_logic.h"  // Для stream_create, stream_add_recipient, stream_remove_recipient
 #include "network.h"
 
 // Глобальная переменная для UDP сокета
@@ -30,8 +31,8 @@ void handle_client_message(Connection* conn, uint8_t message_type, const uint8_t
     
     switch (message_type) {
         case CLIENT_UDP_ADDR:
-            if (payload_len >= sizeof(UDPAddrPayload)) {
-                handle_udp_addr(conn, (const UDPAddrPayload*)payload);
+            if (payload_len >= sizeof(UDPAddrFullPayload)) {
+                handle_udp_addr(conn, (const UDPAddrFullPayload*) payload);
             } else {
                 printf("ERROR: Invalid UDP addr payload size\n");
             }
@@ -69,44 +70,55 @@ void handle_client_message(Connection* conn, uint8_t message_type, const uint8_t
     }
 }
 
-void handle_udp_addr(Connection* conn, const UDPAddrPayload* payload) {
-    printf("handle_udp_addr: conn_fd=%d, ", conn->fd);
-    print_udp_addr(payload);
-    printf("\n");
+void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload) {
+    printf("handle_udp_addr: conn_fd=%d\n", conn->fd);
     
-    // Сохраняем UDP адрес клиента
+    // Проверяем что это IPv4
+    if (ntohs(payload->family) != AF_INET) {
+        printf("ERROR: Invalid address family: %u\n", ntohs(payload->family));
+        return;
+    }
+    
     struct sockaddr_in udp_addr;
     memset(&udp_addr, 0, sizeof(udp_addr));
     udp_addr.sin_family = AF_INET;
-    udp_addr.sin_port = payload->port;
+    udp_addr.sin_port = payload->port; 
     udp_addr.sin_addr.s_addr = payload->ip;
     
     connection_set_udp_addr(conn, &udp_addr);
+    
+    char addr_str[64];
+    sockaddr_to_string(&udp_addr, addr_str, sizeof(addr_str));
+    printf("Client %s set UDP address: %s\n", 
+           connection_get_address_string(conn), addr_str);
 }
 
 void handle_disconnect(Connection* conn) {
     printf("handle_disconnect: conn_fd=%d\n", conn->fd);
-    cleanup_streams_on_disconnect(conn);
+    // Заменяем cleanup_streams_on_disconnect на правильные функции
+    connection_detach_from_streams(conn);    // Отписываем от всех стримов как зритель
+    connection_delete_owned_streams(conn);   // Удаляем все стримы как владелец
 }
 
 void handle_stream_create(Connection* conn) {
     printf("handle_stream_create: conn_fd=%d\n", conn->fd);
     
-    // Генерируем ID трансляции и создаем ее
-    uint32_t stream_id = stream_generate_id();
-    int result = create_stream_for_connection(conn, stream_id);
+    // Заменяем create_stream_for_connection на stream_create
+    Stream* stream = stream_create(0, conn); // 0 - сгенерируется автоматически
     
-    if (result == 0) {
-        send_stream_created(conn, stream_find_by_id(stream_id));
+    if (stream != NULL) {
+        send_stream_created(conn, stream);
+    } else {
+        printf("ERROR: Failed to create stream for connection %d\n", conn->fd);
     }
 }
 
 void handle_stream_delete(Connection* conn, const StreamIDPayload* payload) {
     printf("handle_stream_delete: conn_fd=%d, ", conn->fd);
-    print_stream_id(payload->stream_id);
+    print_stream_id(ntohl(payload->stream_id));
     printf("\n");
     
-    Stream* stream = stream_find_by_id(payload->stream_id);
+    Stream* stream = stream_find_by_id(ntohl(payload->stream_id));
     if (!stream) {
         printf("ERROR: Stream not found\n");
         return;
@@ -121,32 +133,31 @@ void handle_stream_delete(Connection* conn, const StreamIDPayload* payload) {
     // Уведомляем всех получателей о закрытии трансляции
     send_stream_deleted_to_recipients(stream);
     
-    // Удаляем трансляцию
-    stream_remove_from_registry(stream);
+    // Удаляем трансляцию через stream_logic (автоматически удаляет из реестра)
     stream_destroy(stream);
 }
 
 void handle_stream_join(Connection* conn, const StreamIDPayload* payload) {
     printf("handle_stream_join: conn_fd=%d, ", conn->fd);
-    print_stream_id(payload->stream_id);
+    print_stream_id(ntohl(payload->stream_id));
     printf("\n");
     
-    Stream* stream = stream_find_by_id(payload->stream_id);
+    Stream* stream = stream_find_by_id(ntohl(payload->stream_id));
     if (!stream) {
         printf("ERROR: Stream not found\n");
         send_join_result(conn, NULL, -1);
         return;
     }
     
-    // Проверяем, не является ли клиент уже получателем
-    if (stream_is_recipient(stream, conn)) {
+    // Проверяем, не является ли уже получателем
+    if (stream_is_recipient_in_array(stream, conn)) {
         printf("ERROR: Already recipient of this stream\n");
         send_join_result(conn, stream, -2);
         return;
     }
     
-    // Добавляем получателя в трансляцию
-    int result = add_recipient_to_stream(stream, conn);
+    // Заменяем add_recipient_to_stream на stream_add_recipient
+    int result = stream_add_recipient(stream, conn);
     send_join_result(conn, stream, result);
     
     if (result == 0) {
@@ -162,17 +173,17 @@ void handle_stream_join(Connection* conn, const StreamIDPayload* payload) {
 
 void handle_stream_leave(Connection* conn, const StreamIDPayload* payload) {
     printf("handle_stream_leave: conn_fd=%d, ", conn->fd);
-    print_stream_id(payload->stream_id);
+    print_stream_id(ntohl(payload->stream_id));
     printf("\n");
     
-    Stream* stream = stream_find_by_id(payload->stream_id);
+    Stream* stream = stream_find_by_id(ntohl(payload->stream_id));
     if (!stream) {
         printf("ERROR: Stream not found\n");
         return;
     }
     
-    // Удаляем получателя из трансляции
-    int result = remove_recipient_from_stream(stream, conn);
+    // Заменяем remove_recipient_from_stream на stream_remove_recipient
+    int result = stream_remove_recipient(stream, conn);
     
     if (result == 0) {
         // Уведомляем других получателей о выходе участника
@@ -203,11 +214,13 @@ void handle_udp_packet(const uint8_t* data, size_t len, const struct sockaddr_in
     // Извлекаем ID трансляции
     uint32_t stream_id;
     memcpy(&stream_id, data, 4);
+    stream_id = ntohl(stream_id);
     printf(", stream_id=%u", stream_id);
     
     // Извлекаем номер пакета
     uint32_t packet_number;
     memcpy(&packet_number, data + 4, 4);
+    packet_number = ntohl(packet_number);
     printf(", packet_number=%u", packet_number);
     printf("\n");
     
@@ -236,13 +249,29 @@ void send_stream_created(Connection* conn, const Stream* stream) {
     printf("\n");
     
     StreamIDPayload payload;
-    payload.stream_id = stream->stream_id;
+    payload.stream_id = htonl(stream->stream_id);
     
     uint8_t message[5];
     message[0] = SERVER_STREAM_CREATED;
     memcpy(&message[1], &payload, sizeof(payload));
     
-    connection_send_message(conn, message, sizeof(message));
+    printf("DEBUG: Sending SERVER_STREAM_CREATED: type=0x%02x, stream_id=%u\n",
+           message[0], ntohl(payload.stream_id));
+    
+    // Отправляем сообщение
+    int result = connection_send_message(conn, message, sizeof(message));
+    printf("DEBUG: connection_send_message result: %d\n", result);
+    
+    // НЕМЕДЛЕННО пытаемся отправить данные
+    if (conn->write_buffer.position > 0) {
+        printf("DEBUG: Data in write buffer, forcing flush\n");
+        connection_write_data(conn);
+        
+        // Если все еще есть данные, добавляем EPOLLOUT для мониторинга
+        if (conn->write_buffer.position > 0) {
+            epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLOUT | EPOLLET);
+        }
+    }
 }
 
 void send_stream_deleted_to_recipients(const Stream* stream) {
@@ -251,7 +280,7 @@ void send_stream_deleted_to_recipients(const Stream* stream) {
     printf(", recipient_count=%u\n", stream->recipient_count);
     
     StreamIDPayload payload;
-    payload.stream_id = stream->stream_id;
+    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
     
     broadcast_to_stream(stream, SERVER_STREAM_DELETED, &payload, sizeof(payload), NULL);
 }
@@ -262,14 +291,14 @@ void send_join_result(Connection* conn, const Stream* stream, int result) {
     if (stream && result == 0) {
         // Успешное присоединение
         StreamIDPayload payload;
-        payload.stream_id = stream->stream_id;
+        payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
         
         uint8_t message[5];
         message[0] = SERVER_STREAM_JOINED;
         memcpy(&message[1], &payload, sizeof(payload));
         connection_send_message(conn, message, sizeof(message));
     } else {
-        // Ошибка присоединения
+        // Ошибка присоединения - отправляем сообщение без payload
         uint8_t message[1] = {SERVER_STREAM_JOINED};
         connection_send_message(conn, message, 1);
     }
@@ -281,7 +310,7 @@ void send_stream_start_to_owner(const Stream* stream) {
     printf("\n");
     
     StreamIDPayload payload;
-    payload.stream_id = stream->stream_id;
+    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
     
     uint8_t message[5];
     message[0] = SERVER_STREAM_START;
@@ -296,7 +325,7 @@ void send_stream_end_to_owner(const Stream* stream) {
     printf("\n");
     
     StreamIDPayload payload;
-    payload.stream_id = stream->stream_id;
+    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
     
     uint8_t message[5];
     message[0] = SERVER_STREAM_END;
@@ -311,7 +340,7 @@ void send_new_recipient_to_stream(const Stream* stream, const Connection* new_re
     printf(", new_recipient_fd=%d\n", new_recipient->fd);
     
     RecipientNotificationPayload payload;
-    payload.stream_id = stream->stream_id;
+    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
     payload.recipient_addr.port = new_recipient->udp_addr.sin_port;
     payload.recipient_addr.ip = new_recipient->udp_addr.sin_addr.s_addr;
     
@@ -324,7 +353,7 @@ void send_recipient_left_to_stream(const Stream* stream, const Connection* left_
     printf(", left_recipient_fd=%d\n", left_recipient->fd);
     
     RecipientNotificationPayload payload;
-    payload.stream_id = stream->stream_id;
+    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
     payload.recipient_addr.port = left_recipient->udp_addr.sin_port;
     payload.recipient_addr.ip = left_recipient->udp_addr.sin_addr.s_addr;
     
@@ -335,7 +364,9 @@ void send_recipient_left_to_stream(const Stream* stream, const Connection* left_
 
 void handle_connection_closed(Connection* conn) {
     printf("handle_connection_closed: conn_fd=%d\n", conn->fd);
-    cleanup_streams_on_disconnect(conn);
+    // Заменяем cleanup_streams_on_disconnect на правильные функции
+    connection_detach_from_streams(conn);    // Отписываем от всех стримов как зритель
+    connection_delete_owned_streams(conn);   // Удаляем все стримы как владелец
 }
 
 void broadcast_to_stream(const Stream* stream, uint8_t message_type, const void* payload, size_t payload_len, const Connection* exclude) {

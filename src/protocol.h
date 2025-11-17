@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/socket.h>  // Добавлено для struct sockaddr
+#include <netinet/in.h>   // Добавлено для struct sockaddr_in
 
 // Forward declarations
 typedef struct Connection Connection;
@@ -26,12 +28,21 @@ typedef struct Stream Stream;
 
 // ==================== ФОРМАТЫ СООБЩЕНИЙ ====================
 
-// CLIENT_UDP_ADDR: [1 байт] + [6 байт: порт (2) + IPv4 (4)]
 #pragma pack(push, 1)
+// Новая структура для 16-байтного sockaddr_in
+typedef struct {
+    uint16_t family;  // 2 байта - sin_family
+    uint16_t port;    // 2 байта - sin_port (сетевой порядок)
+    uint32_t ip;      // 4 байта - sin_addr (сетевой порядок)
+    uint8_t zero[8];  // 8 байт - sin_zero
+} UDPAddrFullPayload;
+
+// Старая структура оставляем для обратной совместимости
 typedef struct {
     uint16_t port;    // сетевой порядок
     uint32_t ip;      // IPv4 в сетевом порядке
 } UDPAddrPayload;
+#pragma pack(pop)
 
 // CLIENT_STREAM_CREATE: [1 байт] (без данных)
 
@@ -52,3 +63,42 @@ typedef struct {
     UDPAddrPayload recipient_addr;
 } RecipientNotificationPayload;
 #pragma pack(pop)
+
+// ==================== ОБРАБОТЧИКИ TCP СООБЩЕНИЙ ОТ КЛИЕНТА ====================
+
+// Диспетчер входящих сообщений
+void handle_client_message(Connection* conn, uint8_t message_type, const uint8_t* payload, size_t payload_len);
+
+// Конкретные обработчики
+void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload);
+void handle_disconnect(Connection* conn);
+void handle_stream_create(Connection* conn);
+void handle_stream_delete(Connection* conn, const StreamIDPayload* payload);
+void handle_stream_join(Connection* conn, const StreamIDPayload* payload);
+void handle_stream_leave(Connection* conn, const StreamIDPayload* payload);
+
+// ==================== ОБРАБОТЧИКИ UDP ПАКЕТОВ ====================
+
+// Обработчик входящих UDP пакетов
+void handle_udp_packet(const uint8_t* data, size_t len, const struct sockaddr_in* src_addr);
+
+// ==================== ФУНКЦИИ ОТПРАВКИ ОТВЕТОВ КЛИЕНТАМ ====================
+
+// Отправка уведомлений о трансляциях
+void send_stream_created(Connection* conn, const Stream* stream);
+void send_stream_deleted_to_recipients(const Stream* stream);
+void send_join_result(Connection* conn, const Stream* stream, int result);
+void send_stream_start_to_owner(const Stream* stream);
+void send_stream_end_to_owner(const Stream* stream);
+
+// Отправка уведомлений о участниках трансляций
+void send_new_recipient_to_stream(const Stream* stream, const Connection* new_recipient);
+void send_recipient_left_to_stream(const Stream* stream, const Connection* left_recipient);
+
+// ==================== СЛУЖЕБНЫЕ ФУНКЦИИ ====================
+
+// Обработка отключения клиента
+void handle_connection_closed(Connection* conn);
+
+// Рассылка сообщения всем получателям трансляции
+void broadcast_to_stream(const Stream* stream, uint8_t message_type, const void* payload, size_t payload_len, const Connection* exclude);

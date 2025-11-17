@@ -3,6 +3,10 @@
 #include <netinet/in.h>
 #include <sys/epoll.h>
 
+extern int g_epoll_fd;
+extern int g_tcp_fd;
+extern int g_udp_fd;
+
 // Настройка неблокирующего сокета
 int set_nonblocking(int fd);
 

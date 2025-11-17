@@ -1,142 +1,180 @@
 #include "connection.h"
+#include "buffer_logic.h"  // Только базовые функции буфера
+#include "stream.h"  // Добавлено для полного определения Stream
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
-#include "stream.h"
+#include <errno.h>
+#include <arpa/inet.h>  // Добавлено для inet_ntoa
+
 #include "network.h"
 
 Connection* connections = NULL;
 
 Connection* connection_create(int fd, const struct sockaddr_in* addr) {
-    Connection* conn = (Connection*)malloc(sizeof(Connection));
+    if (fd < 0) return NULL;
+
+    Connection* conn = calloc(1, sizeof(Connection));
     if (!conn) return NULL;
+
     conn->fd = fd;
+    
+    // Используем функции из buffer.h для инициализации
     buffer_init(&conn->read_buffer);
     buffer_init(&conn->write_buffer);
-    if (addr) memcpy(&conn->tcp_addr, addr, sizeof(struct sockaddr_in));
-    else memset(&conn->tcp_addr, 0, sizeof(struct sockaddr_in));
-    memset(&conn->udp_addr, 0, sizeof(struct sockaddr_in));
-    for (int i = 0; i < MAX_INPUT; ++i) conn->watch_streams[i] = NULL;
-    for (int i = 0; i < MAX_OUTPUT; ++i) conn->own_streams[i] = NULL;
+
+    if (addr) {
+        memcpy(&conn->tcp_addr, addr, sizeof(struct sockaddr_in));
+    }
+
+    // Инициализация массивов
+    for (int i = 0; i < MAX_INPUT; i++) {
+        conn->watch_streams[i] = NULL;
+    }
+    for (int i = 0; i < MAX_OUTPUT; i++) {
+        conn->own_streams[i] = NULL;
+    }
+
     return conn;
 }
 
 void connection_destroy(Connection* conn) {
     if (!conn) return;
-
-    /* Создаем копии массивов, чтобы безопасно изменять оригинал во время итерации */
-    Stream* watch_copy[MAX_INPUT];
-    Stream* own_copy[MAX_OUTPUT];
-    int watch_count = 0;
-    int own_count = 0;
-
-    for (int i = 0; i < MAX_INPUT && conn->watch_streams[i] != NULL; ++i) {
-        watch_copy[watch_count++] = conn->watch_streams[i];
+    if (conn->fd >= 0) {
+        close(conn->fd);
     }
-    for (int i = 0; i < MAX_OUTPUT && conn->own_streams[i] != NULL; ++i) {
-        own_copy[own_count++] = conn->own_streams[i];
-    }
-
-    /* Удаляем connection из всех просматриваемых стримов */
-    for (int i = 0; i < watch_count; ++i) {
-        Stream* s = watch_copy[i];
-        if (s) {
-            stream_remove_recipient(s, conn);
-        }
-    }
-
-    /* Для всех собственных стримов: если стрим всё ещё в реестре — уничтожаем его.
-       stream_destroy сам удаляет из реестра и очищает связи. */
-    for (int i = 0; i < own_count; ++i) {
-        Stream* s = own_copy[i];
-        if (!s) continue;
-        Stream* reg = stream_find_by_id(s->stream_id);
-        if (reg == s) {
-            stream_destroy(s);
-        } else {
-            /* Если стрима в реестре нет — возможно, он уже был уничтожен ранее.
-               Ничего больше не делаем. */
-        }
-    }
-
-    /* Закрываем дескриптор и чистим буферы */
-    if (conn->fd > 0) close(conn->fd);
-    buffer_clear(&conn->read_buffer);
-    buffer_clear(&conn->write_buffer);
-
-    /* Не делаем HASH_DEL(connections, conn) здесь — удаление из глобальной таблицы
-       должны делать функции управления (connection_remove / connection_close_all),
-       иначе получится двойное удаление. */
-
     free(conn);
 }
 
-int connection_add(Connection* conn) {
-    if (!conn) return -1;
-    Connection* found = connection_find(conn->fd);
-    if (found) return -2;
+void connection_add(Connection* conn) {
+    if (!conn) return;
     HASH_ADD_INT(connections, fd, conn);
-    return 0;
 }
 
 Connection* connection_find(int fd) {
-    Connection* conn = NULL;
-    HASH_FIND_INT(connections, &fd, conn);
-    return conn;
+    Connection* result = NULL;
+    HASH_FIND_INT(connections, &fd, result);
+    return result;
 }
 
-int connection_remove(int fd) {
+void connection_remove(int fd) {
     Connection* conn = connection_find(fd);
-    if (!conn) return -1;
-    HASH_DEL(connections, conn);
-    connection_destroy(conn);
-    return 0;
-}
-
-void connection_close_all(void) {
-    Connection *c, *tmp;
-    HASH_ITER(hh, connections, c, tmp) {
-        HASH_DEL(connections, c);
-        connection_destroy(c);
+    if (conn) {
+        HASH_DEL(connections, conn);
+        connection_destroy(conn);
     }
 }
 
-/* Операции с сокетами - обёртки */
+void connection_close_all(void) {
+    Connection* current;
+    Connection* tmp;
+    HASH_ITER(hh, connections, current, tmp) {
+        HASH_DEL(connections, current);
+        connection_destroy(current);
+    }
+}
+
 int connection_read_data(Connection* conn) {
     if (!conn) return -1;
-    return buffer_read_socket(&conn->read_buffer, conn->fd);
+
+    uint8_t temp[512];
+    ssize_t n = read(conn->fd, temp, sizeof(temp));
+
+    if (n > 0) {
+        BufferResult res = buffer_write(&conn->read_buffer, temp, (uint32_t)n);
+        if (res == BUFFER_OVERFLOW) {
+            fprintf(stderr, "connection_read_data: buffer overflow\n");
+            buffer_clear(&conn->read_buffer);
+            return -1;
+        }
+        
+        // Используем ваш buffer_protocol_set_expected для установки размера
+        buffer_protocol_set_expected(&conn->read_buffer);
+        
+        return (int)n;
+    } else if (n == 0) {
+        return 0; // соединение закрыто
+    } else {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return -2;
+        return -1;
+    }
 }
 
 int connection_write_data(Connection* conn) {
     if (!conn) return -1;
-    return buffer_write_socket(&conn->write_buffer, conn->fd);
+
+    if (conn->write_buffer.position == 0)
+        return 0; // нечего писать
+
+    // Отправляем все данные из буфера записи
+    ssize_t n = write(conn->fd,
+                      conn->write_buffer.data,
+                      conn->write_buffer.position);
+
+    if (n > 0) {
+        // Сдвигаем оставшиеся данные в буфере
+        uint32_t remaining = conn->write_buffer.position - n;
+        if (remaining > 0) {
+            memmove(conn->write_buffer.data, conn->write_buffer.data + n, remaining);
+        }
+        conn->write_buffer.position = remaining;
+
+        // Если отправили все данные - очищаем буфер
+        if (conn->write_buffer.position == 0) {
+            buffer_clear(&conn->write_buffer);
+            return 1; // все данные записаны
+        }
+        return -2; // записано частично
+    } else if (n == 0) {
+        return 0; // соединение закрыто
+    } else {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return -2; // нужно повторить позже
+        return -1; // ошибка
+    }
 }
 
 int connection_send_message(Connection* conn, const void* data, size_t len) {
-    if (!conn || !data) return -1;
-    if (len > BUFFER_SIZE) return -1;
-    buffer_prepare_send(&conn->write_buffer, data, len);
-    return connection_write_data(conn);
+    if (!conn || !data || len == 0)
+        return -1;
+    if (len > BUFFER_SIZE)
+        return -1;
+
+    // Используем функции buffer.h для подготовки сообщения
+    buffer_clear(&conn->write_buffer);
+    buffer_reserve(&conn->write_buffer, (uint32_t)len);
+    buffer_write(&conn->write_buffer, data, (uint32_t)len);
+
+    int result = connection_write_data(conn);
+    
+    if (result == -2) { // EAGAIN/EWOULDBLOCK
+        // Добавляем EPOLLOUT чтобы получить уведомление когда сокет снова готов к записи
+        epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLOUT | EPOLLET);
+    }
+    
+    return result;;
 }
 
 /* UDP */
-int connection_set_udp_addr(Connection* conn, const struct sockaddr_in* udp_addr) {
-    if (!conn || !udp_addr) return -1;
+void connection_set_udp_addr(Connection* conn, const struct sockaddr_in* udp_addr) {
+    if (!conn || !udp_addr) return;
     memcpy(&conn->udp_addr, udp_addr, sizeof(struct sockaddr_in));
-    return 0;
 }
 
 bool connection_has_udp(const Connection* conn) {
-    if (!conn) return false;
-    return conn->udp_addr.sin_port != 0;
+    return conn && conn->udp_addr.sin_port != 0;
 }
 
-/* Управление просматриваемыми трансляциями (только модификация указателей) */
+/* Управление просматриваемыми трансляциями */
 int connection_add_watch_stream(Connection* conn, Stream* stream) {
     if (!conn || !stream) return -1;
     if (connection_is_watching_stream(conn, stream)) return -2;
+    if (connection_get_watch_stream_count(conn) >= MAX_INPUT) {
+        return -3; // Нет места
+    }
     for (int i = 0; i < MAX_INPUT; ++i) {
         if (conn->watch_streams[i] == NULL) {
             conn->watch_streams[i] = stream;
@@ -148,6 +186,7 @@ int connection_add_watch_stream(Connection* conn, Stream* stream) {
 
 int connection_remove_watch_stream(Connection* conn, Stream* stream) {
     if (!conn || !stream) return -1;
+    
     for (int i = 0; i < MAX_INPUT; ++i) {
         if (conn->watch_streams[i] == stream) {
             /* Плотный массив: сдвигаем влево */
@@ -163,6 +202,7 @@ int connection_remove_watch_stream(Connection* conn, Stream* stream) {
 
 bool connection_is_watching_stream(const Connection* conn, const Stream* stream) {
     if (!conn || !stream) return false;
+    
     for (int i = 0; i < MAX_INPUT && conn->watch_streams[i] != NULL; ++i) {
         if (conn->watch_streams[i] == stream) return true;
     }
@@ -171,15 +211,19 @@ bool connection_is_watching_stream(const Connection* conn, const Stream* stream)
 
 int connection_get_watch_stream_count(const Connection* conn) {
     if (!conn) return 0;
-    int c = 0;
-    for (int i = 0; i < MAX_INPUT; ++i) if (conn->watch_streams[i] != NULL) ++c;
-    return c;
+    
+    int count = 0;
+    for (int i = 0; i < MAX_INPUT; ++i) {
+        if (conn->watch_streams[i] != NULL) count++;
+    }
+    return count;
 }
 
-/* Управление управляемыми трансляциями (только модификация указателей) */
+/* Управление управляемыми трансляциями */
 int connection_add_own_stream(Connection* conn, Stream* stream) {
     if (!conn || !stream) return -1;
     if (connection_is_owning_stream(conn, stream)) return -2;
+    
     for (int i = 0; i < MAX_OUTPUT; ++i) {
         if (conn->own_streams[i] == NULL) {
             conn->own_streams[i] = stream;
@@ -191,6 +235,7 @@ int connection_add_own_stream(Connection* conn, Stream* stream) {
 
 int connection_remove_own_stream(Connection* conn, Stream* stream) {
     if (!conn || !stream) return -1;
+    
     for (int i = 0; i < MAX_OUTPUT; ++i) {
         if (conn->own_streams[i] == stream) {
             for (int j = i; j + 1 < MAX_OUTPUT; ++j) {
@@ -205,6 +250,7 @@ int connection_remove_own_stream(Connection* conn, Stream* stream) {
 
 bool connection_is_owning_stream(const Connection* conn, const Stream* stream) {
     if (!conn || !stream) return false;
+    
     for (int i = 0; i < MAX_OUTPUT && conn->own_streams[i] != NULL; ++i) {
         if (conn->own_streams[i] == stream) return true;
     }
@@ -213,20 +259,30 @@ bool connection_is_owning_stream(const Connection* conn, const Stream* stream) {
 
 int connection_get_own_stream_count(const Connection* conn) {
     if (!conn) return 0;
-    int c = 0;
-    for (int i = 0; i < MAX_OUTPUT; ++i) if (conn->own_streams[i] != NULL) ++c;
-    return c;
+    
+    int count = 0;
+    for (int i = 0; i < MAX_OUTPUT; ++i) {
+        if (conn->own_streams[i] != NULL) count++;
+    }
+    return count;
 }
 
 /* Поиск стрима в соединении */
 Stream* connection_find_stream_by_id(const Connection* conn, uint32_t stream_id) {
     if (!conn) return NULL;
+    
+    // Сначала ищем в owned streams
     for (int i = 0; i < MAX_OUTPUT && conn->own_streams[i] != NULL; ++i) {
-        if (conn->own_streams[i]->stream_id == stream_id) return conn->own_streams[i];
+        if (conn->own_streams[i]->stream_id == stream_id) 
+            return conn->own_streams[i];
     }
+    
+    // Затем в watched streams
     for (int i = 0; i < MAX_INPUT && conn->watch_streams[i] != NULL; ++i) {
-        if (conn->watch_streams[i]->stream_id == stream_id) return conn->watch_streams[i];
+        if (conn->watch_streams[i]->stream_id == stream_id) 
+            return conn->watch_streams[i];
     }
+    
     return NULL;
 }
 
@@ -237,13 +293,23 @@ int connection_get_stream_count(const Connection* conn) {
 
 int connection_get_all_streams(const Connection* conn, Stream** result, int max_results) {
     if (!conn || !result || max_results <= 0) return 0;
+    
     int count = 0;
+    
+    // Добавляем watched streams
     for (int i = 0; i < MAX_INPUT && count < max_results; ++i) {
-        if (conn->watch_streams[i] != NULL) result[count++] = conn->watch_streams[i];
+        if (conn->watch_streams[i] != NULL) {
+            result[count++] = conn->watch_streams[i];
+        }
     }
+    
+    // Добавляем owned streams
     for (int i = 0; i < MAX_OUTPUT && count < max_results; ++i) {
-        if (conn->own_streams[i] != NULL) result[count++] = conn->own_streams[i];
+        if (conn->own_streams[i] != NULL) {
+            result[count++] = conn->own_streams[i];
+        }
     }
+    
     return count;
 }
 
@@ -253,6 +319,10 @@ const char* connection_get_address_string(const Connection* conn) {
     if (!conn) {
         return "<null>";
     }
-    sockaddr_to_string(&conn->tcp_addr, buffer, sizeof(buffer));
+    
+    const char* ip = inet_ntoa(conn->tcp_addr.sin_addr);
+    uint16_t port = ntohs(conn->tcp_addr.sin_port);
+    snprintf(buffer, sizeof(buffer), "%s:%d", ip, port);
+    
     return buffer;
 }
