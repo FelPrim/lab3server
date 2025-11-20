@@ -79,7 +79,7 @@ void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload) {
            ntohs(payload->port), ntohl(payload->ip));
     
     // Проверяем что это IPv4
-    if (ntohs(payload->family) != AF_INET) {
+    if (payload->family != AF_INET) {
         printf("ERROR: Invalid address family: %u (expected AF_INET=%d)\n", 
                ntohs(payload->family), AF_INET);
         return;
@@ -221,12 +221,12 @@ void handle_udp_packet(const uint8_t* data, size_t len, const struct sockaddr_in
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src_addr->sin_addr, ip_str, sizeof(ip_str));
     
-    printf("🟢 UDP_PACKET_RECEIVED: from %s:%d, len=%zu", 
+    printf("handle_udp_packet: from %s:%d, len=%zu", 
            ip_str, ntohs(src_addr->sin_port), len);
     
     // Проверяем минимальный размер пакета (8 байт: 4 байта ID + 4 байта номера пакета)
     if (len < 8) {
-        printf(" ❌ ERROR: UDP packet too small: %zu bytes\n", len);
+        printf("ERROR: UDP packet too small: %zu bytes\n", len);
         return;
     }
     
@@ -241,51 +241,23 @@ void handle_udp_packet(const uint8_t* data, size_t len, const struct sockaddr_in
     memcpy(&packet_number, data + 4, 4);
     packet_number = ntohl(packet_number);
     printf(", packet_number=%u", packet_number);
-    
-    // Дополнительная информация о пакете
-    printf(", data_size=%zu", len - 8); // минус заголовок
+    printf("\n");
     
     // Находим трансляцию
     Stream* stream = stream_find_by_id(stream_id);
     if (!stream) {
-        printf(" ❌ ERROR: Stream %u not found\n", stream_id);
+        printf("ERROR: Stream %u not found\n", stream_id);
         return;
     }
     
-    printf(" ✅ Stream found");
-    
-    // Логируем информацию о стриме
-    printf(", owner=%s", connection_get_address_string(stream->owner));
-    printf(", recipients_count=%u", stream->recipient_count);
-    
     // Пересылаем пакет всем получателям
-    int sent_count = 0;
     for (uint32_t i = 0; i < stream->recipient_count; i++) {
         Connection* recipient = stream->recipients[i];
         if (connection_has_udp(recipient)) {
-            char recipient_ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &recipient->udp_addr.sin_addr, recipient_ip, sizeof(recipient_ip));
-            
-            printf(" → Sending to recipient[%d]: %s:%d", 
-                   i, recipient_ip, ntohs(recipient->udp_addr.sin_port));
-            
             // Используем глобальный UDP сокет
-            int result = udp_send_packet(g_udp_fd, data, len, &recipient->udp_addr);
-            
-            if (result > 0) {
-                printf(" ✅");
-                sent_count++;
-            } else if (result == -2) {
-                printf(" ⚠️ EAGAIN");
-            } else {
-                printf(" ❌ FAILED");
-            }
-        } else {
-            printf(" → Recipient[%d] has no UDP addr", i);
+            udp_send_packet(g_udp_fd, data, len, &recipient->udp_addr);
         }
     }
-    
-    printf(" | Sent: %d/%d recipients\n", sent_count, stream->recipient_count);
 }
 
 // ==================== ФУНКЦИИ ОТПРАВКИ ОТВЕТОВ КЛИЕНТАМ ====================
