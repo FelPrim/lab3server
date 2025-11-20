@@ -73,11 +73,6 @@ void handle_client_message(Connection* conn, uint8_t message_type, const uint8_t
 void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload) {
     printf("handle_udp_addr: conn_fd=%d\n", conn->fd);
     
-    // Детальный отладочный вывод
-    printf("DEBUG: UDPAddrFullPayload - family: 0x%04x (ntohs: %d), port: %u, ip: 0x%08x\n",
-           payload->family, ntohs(payload->family), 
-           ntohs(payload->port), ntohl(payload->ip));
-    
     // Проверяем что это IPv4
     if (ntohs(payload->family) != AF_INET) {
         printf("ERROR: Invalid address family: %u (expected AF_INET=%d)\n", 
@@ -88,14 +83,14 @@ void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload) {
     struct sockaddr_in udp_addr;
     memset(&udp_addr, 0, sizeof(udp_addr));
     udp_addr.sin_family = AF_INET;
-    udp_addr.sin_port = payload->port;
+    udp_addr.sin_port = payload->port;  // порт уже в сетевом порядке
     
-    // ИСПРАВЛЕНИЕ: Если IP равен 0.0.0.0, используем IP из TCP подключения
-    if (payload->ip == 0) {
+    // ИСПРАВЛЕНИЕ: Правильная проверка IP 0.0.0.0
+    if (payload->ip == 0 || ntohl(payload->ip) == 0) {
         printf("WARNING: Client sent 0.0.0.0 IP, using TCP connection IP instead\n");
         udp_addr.sin_addr.s_addr = conn->tcp_addr.sin_addr.s_addr;
     } else {
-        udp_addr.sin_addr.s_addr = payload->ip;
+        udp_addr.sin_addr.s_addr = payload->ip;  // IP уже в сетевом порядке
     }
     
     connection_set_udp_addr(conn, &udp_addr);
@@ -104,12 +99,6 @@ void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload) {
     sockaddr_to_string(&udp_addr, addr_str, sizeof(addr_str));
     printf("Client %s set UDP address: %s\n", 
            connection_get_address_string(conn), addr_str);
-    
-    // Дополнительная проверка
-    struct in_addr ip_addr;
-    ip_addr.s_addr = udp_addr.sin_addr.s_addr;
-    printf("DEBUG: Final UDP address - IP: %s, Port: %d\n", 
-           inet_ntoa(ip_addr), ntohs(payload->port));
 }
 
 void handle_disconnect(Connection* conn) {
