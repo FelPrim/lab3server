@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "uthash.h"
+#include "dense_array.h"
 
 // Limits
 #ifndef MAX_INPUT
@@ -17,22 +18,21 @@
 #define STREAM_MAX_RECIPIENTS 4
 #endif
 
-// Forward declaration
 typedef struct Connection Connection;
+typedef struct Call Call;
 
 typedef struct Stream {
-    uint32_t stream_id;                          
-    Connection* owner;                           
+    const uint32_t stream_id;                          
+    const Call* call;    
+    const Connection* owner;
     Connection* recipients[STREAM_MAX_RECIPIENTS]; 
     uint32_t recipient_count;                    
     UT_hash_handle hh;                           
 } Stream;
 
-/* Глобальная хеш-таблица стримов */
 extern Stream* streams;
 
-/* Базовые операции с памятью */
-Stream* stream_alloc(uint32_t stream_id, Connection* owner);
+Stream* stream_alloc(uint32_t stream_id, Connection* owner, const Call* call);
 void stream_free(Stream* stream);
 
 /* Управление получателями (только массив, без логики connection) */

@@ -1,13 +1,13 @@
 #include "connection.h"
-#include "buffer_logic.h"  // Только базовые функции буфера
-#include "stream.h"  // Добавлено для полного определения Stream
+#include "buffer_logic.h" 
+#include "stream.h"  
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
 #include <errno.h>
-#include <arpa/inet.h>  // Добавлено для inet_ntoa
+#include <arpa/inet.h>  
 
 #include "network.h"
 

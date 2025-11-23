@@ -5,16 +5,17 @@
 #include <stdbool.h>
 #include "buffer.h"  
 #include "uthash.h"
-#include "stream.h"
+#include "dense_array.h"
 
 #define MAX_INPUT 4
 #define MAX_OUTPUT 4
+#define MAX_CONNECTION_CALLS 4
 
-// Forward declarations
 typedef struct Stream Stream;
+typedef struct Call Call;
 
 typedef struct Connection {
-    int fd;
+    const int fd;
 
     Buffer read_buffer;
     Buffer write_buffer;
@@ -24,6 +25,7 @@ typedef struct Connection {
 
     Stream* watch_streams[MAX_INPUT];
     Stream* own_streams[MAX_OUTPUT];
+    Call* calls[MAX_CONNECTION_CALLS];
 
     UT_hash_handle hh;
 } Connection;
@@ -54,17 +56,19 @@ int  connection_remove_own_stream(Connection* conn, Stream* stream);
 bool connection_is_owning_stream(const Connection* conn, const Stream* stream);
 int  connection_get_own_stream_count(const Connection* conn);
 
+int connection_add_call(Connection* conn, Call* call);
+int connection_remove_call(Connection* conn, Call* call);
+bool connection_is_in_call(const Connection* conn, const Call* call);
+int connection_get_call_count(const Connection* conn);
+
 Stream* connection_find_stream_by_id(const Connection* conn, uint32_t stream_id);
+Call* connection_find_call_by_id(const Connection* conn, uint32_t call_id);
 int connection_get_stream_count(const Connection* conn);
 int connection_get_all_streams(const Connection* conn, Stream** result, int max_results);
+int connection_get_all_calls(const Connection* conn, Call** result, int max_results);
 
 const char* connection_get_address_string(const Connection* conn);
 
-// Убрано дублирующее объявление connection_destroy_full - оно уже есть в connection_logic.h
-
-// Добавьте в конец connection.h
-
-// Управление стримами через connection_logic
 int connection_logic_add_own_stream(Connection* conn, Stream* stream);
 int connection_logic_remove_own_stream(Connection* conn, Stream* stream);
 int connection_logic_add_watch_stream(Connection* conn, Stream* stream);
