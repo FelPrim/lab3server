@@ -48,6 +48,82 @@ int connection_remove_call_safe(Connection* conn, Call* call) {
     return -1;
 }
 
+static void connection_add(Connection* conn) {
+    if (!conn) return;
+    HASH_ADD_INT(connections, fd, conn);
+}
+
+
+/* Публичные функции */
+Connection* connection_new(int fd, const struct sockaddr_in* addr) {
+    Connection* conn = connection_alloc(fd, addr);
+    if (!conn) return NULL;
+    
+    // Добавляем в глобальную хеш-таблицу
+    connection_add(conn);
+    
+    return conn;
+}
+
+// В connection.c добавить дополнительную защиту
+void connection_delete(Connection* conn) {
+    if (!conn) return;
+    if (conn->fd < 0) {
+        printf("Warning: Attempted to delete already deleted connection (fd=%d)\n", conn->fd);
+        return;
+    }
+
+    printf("Destroying connection %d\n", conn->fd);
+    
+    // Временно сохраняем fd и помечаем как невалидный
+    int old_fd = conn->fd;
+    conn->fd = -1;
+
+    // 1. Отписываемся от просматриваемых стримов
+    for (int i = MAX_INPUT - 1; i >= 0; i--) {
+        if (conn->watch_streams[i] != NULL) {
+            Stream* stream = conn->watch_streams[i];
+            stream_remove_recipient(stream, conn);
+            conn->watch_streams[i] = NULL;
+        }
+    }
+
+    // 2. Удаляем собственные стримы
+    for (int i = MAX_OUTPUT - 1; i >= 0; i--) {
+        if (conn->own_streams[i] != NULL) {
+            Stream* stream = conn->own_streams[i];
+            stream_delete(stream);
+            conn->own_streams[i] = NULL;
+        }
+    }
+
+    // 3. Выходим из всех звонков
+    for (int i = MAX_CONNECTION_CALLS - 1; i >= 0; i--) {
+        if (conn->calls[i] != NULL) {
+            Call* call = conn->calls[i];
+            call_remove_participant_safe(call, conn);
+            connection_remove_call_safe(conn, call);
+        }
+    }
+
+    // 4. Удаляем из глобальной хеш-таблицы
+    Connection* found = NULL;
+    HASH_FIND_INT(connections, &old_fd, found);
+    if (found == conn) {
+        HASH_DEL(connections, conn);
+    }
+
+    // 5. Закрываем сокет и освобождаем память
+    if (old_fd >= 0) {
+        close(old_fd);
+    }
+    free(conn);
+    
+    printf("Connection %d destroyed\n", old_fd);
+}
+
+// ... остальные функции connection.c без изменений ...
+
 static void connection_free(Connection* conn) {
     if (!conn) return;
     free(conn);
@@ -123,73 +199,6 @@ static void connection_delete_owned_streams(Connection* conn) {
             stream_delete(owned_streams[i]);
         }
     }
-}
-
-static void connection_add(Connection* conn) {
-    if (!conn) return;
-    HASH_ADD_INT(connections, fd, conn);
-}
-
-
-/* Публичные функции */
-Connection* connection_new(int fd, const struct sockaddr_in* addr) {
-    Connection* conn = connection_alloc(fd, addr);
-    if (!conn) return NULL;
-    
-    // Добавляем в глобальную хеш-таблицу
-    connection_add(conn);
-    
-    return conn;
-}
-
-void connection_delete(Connection* conn) {
-    if (!conn) return;
-
-    printf("Destroying connection %d\n", conn->fd);
-
-    // 1. Отписываемся от просматриваемых стримов (синхронно)
-    for (int i = MAX_INPUT - 1; i >= 0; i--) {
-        if (conn->watch_streams[i] != NULL) {
-            Stream* stream = conn->watch_streams[i];
-            // Сначала удаляем из стрима, потом очищаем слот
-            if (stream_remove_recipient(stream, conn) == 0) {
-                conn->watch_streams[i] = NULL;
-            }
-        }
-    }
-
-    // 2. Удаляем собственные стримы (синхронно)  
-    for (int i = MAX_OUTPUT - 1; i >= 0; i--) {
-        if (conn->own_streams[i] != NULL) {
-            Stream* stream = conn->own_streams[i];
-            // Удаляем стрим и очищаем слот
-            stream_delete(stream);
-            conn->own_streams[i] = NULL;
-        }
-    }
-
-    // 3. Выходим из всех звонков (синхронно)
-    for (int i = MAX_CONNECTION_CALLS - 1; i >= 0; i--) {
-        if (conn->calls[i] != NULL) {
-            Call* call = conn->calls[i];
-            // Используем безопасное удаление с обеих сторон
-            call_remove_participant_safe(call, conn);
-            connection_remove_call_safe(conn, call);
-        }
-    }
-
-    // 4. Удаляем из глобальной хеш-таблицы
-    if (conn->fd >= 0) {
-        Connection* found = NULL;
-        HASH_FIND_INT(connections, &conn->fd, found);
-        if (found == conn) {
-            HASH_DEL(connections, conn);
-        }
-    }
-
-    // 5. Закрываем сокет и освобождаем память
-    connection_close(conn);
-    connection_free(conn);
 }
 
 Connection* connection_find(int fd) {

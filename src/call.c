@@ -149,41 +149,61 @@ void call_delete(Call* call) {
     call_free(call);
 }
 
+// В call.c добавить диагностику в функцию call_add_participant
 int call_add_participant(Call* call, Connection* participant) {
     if (!call || !participant) return -1;
     
+    // ДОБАВИТЬ ДИАГНОСТИКУ
+    printf("call_add_participant: call_id=%u, participant_fd=%d, current_participants=%d/%d\n", 
+           call->call_id, participant->fd, call_get_participant_count(call), MAX_CALL_PARTICIPANTS);
 
-    if (!call_can_add_participant(call)) {
-        fprintf(stderr, "Call %u has no space for new participants (MAX_CALL_PARTICIPANTS=%d)\n", 
-                call->call_id, MAX_CALL_PARTICIPANTS);
-        return -5;
-    }
-    
+    // ПРОВЕРКА: Есть ли место у участника для нового звонка?
     if (!connection_can_add_call(participant)) {
-        fprintf(stderr, "Connection %d has no space for new calls (MAX_CONNECTION_CALLS=%d)\n", 
-                participant->fd, MAX_CONNECTION_CALLS);
+        fprintf(stderr, "Connection %d has no space for new calls (MAX_CONNECTION_CALLS=%d, current=%d)\n", 
+                participant->fd, MAX_CONNECTION_CALLS, connection_get_call_count(participant));
         return -6;
     }
 
     // Проверяем, не является ли уже участником
     if (call_has_participant(call, participant)) {
+        printf("Participant %d is already in call %u\n", participant->fd, call->call_id);
         return -2;
     }
     
+    // ПРОВЕРКА: Есть ли место в звонке для нового участника?
+    if (!call_can_add_participant(call)) {
+        fprintf(stderr, "Call %u has no space for new participants (MAX_CALL_PARTICIPANTS=%d, current=%d)\n", 
+                call->call_id, MAX_CALL_PARTICIPANTS, call_get_participant_count(call));
+        return -5;
+    }
+    
     // Добавляем в массив участников звонка
-    if (call_add_participant_to_array(call, participant) != 0) {
+    int result = call_add_participant_to_array(call, participant);
+    if (result < 0) {
+        fprintf(stderr, "Failed to add participant %d to call %u array (result=%d)\n", 
+                participant->fd, call->call_id, result);
+        
+        // ДОПОЛНИТЕЛЬНАЯ ДИАГНОСТИКА: вывести состояние массива участников
+        printf("Call %u participants array state:\n", call->call_id);
+        for (int i = 0; i < MAX_CALL_PARTICIPANTS; i++) {
+            printf("  [%d] = %p", i, call->participants[i]);
+            if (call->participants[i]) {
+                printf(" (fd=%d)", call->participants[i]->fd);
+            }
+            printf("\n");
+        }
         return -3;
     }
     
     // Добавляем звонок в calls участника
     if (connection_add_call(participant, call) != 0) {
+        fprintf(stderr, "Failed to add call %u to connection %d\n", call->call_id, participant->fd);
         // Откатываем добавление в массив участников
         call_remove_participant_from_array(call, participant);
         return -4;
     }
     
-    printf("Added participant fd=%d to call %u\n", participant->fd, call->call_id);
-    
+    printf("Successfully added participant fd=%d to call %u\n", participant->fd, call->call_id);
     return 0;
 }
 

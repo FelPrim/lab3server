@@ -173,6 +173,9 @@ void send_call_stream_deleted(Call* call, Stream* stream);
 
 // ==================== СЛУЖЕБНЫЕ ФУНКЦИИ ПРОТОКОЛА ====================
 
+// В protocol.h изменить объявление broadcast_to_stream_recipients:
+void broadcast_to_stream_recipients(Stream* stream, const void* packet_data, size_t packet_len, Connection* exclude);
+
 void handle_connection_closed(Connection* conn);
-void broadcast_to_stream_recipients(Stream* stream, uint8_t message_type, const void* payload, size_t payload_len, Connection* exclude);
 void broadcast_to_call_participants(Call* call, uint8_t message_type, const void* payload, size_t payload_len, Connection* exclude);
+

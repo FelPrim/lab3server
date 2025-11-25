@@ -186,7 +186,12 @@ void handle_stream_delete(Connection* conn, const StreamIDPayload* payload) {
     
     Call* call = stream->call;
     
-    // Уведомляем зрителей о удалении стрима
+    // ИСПРАВЛЕНИЕ: Сначала отправляем подтверждение клиенту
+    char success_msg[64];
+    snprintf(success_msg, sizeof(success_msg), "SUCCESS: deleted stream %u", stream_id);
+    send_success(conn, CLIENT_STREAM_DELETE, success_msg);
+    
+    // Затем уведомляем зрителей о удалении стрима
     send_stream_deleted(stream);
     
     // Если стрим приватный, уведомляем участников звонка
@@ -194,13 +199,8 @@ void handle_stream_delete(Connection* conn, const StreamIDPayload* payload) {
         send_call_stream_deleted(call, stream);
     }
     
-    // Удаляем стрим
+    // И только потом удаляем стрим
     stream_delete(stream);
-    
-    // Отправляем подтверждение
-    char success_msg[64];
-    snprintf(success_msg, sizeof(success_msg), "SUCCESS: deleted stream %u", stream_id);
-    send_success(conn, CLIENT_STREAM_DELETE, success_msg);
 }
 
 void handle_stream_join(Connection* conn, const StreamIDPayload* payload) {
@@ -307,6 +307,7 @@ void handle_call_create(Connection* conn) {
     send_call_created(conn, call);
 }
 
+// В protocol.c в функции handle_call_join добавить более точную диагностику
 void handle_call_join(Connection* conn, const CallJoinPayload* payload) {
     uint32_t call_id = ntohl(payload->call_id);
     printf("handle_call_join: ");
@@ -323,10 +324,37 @@ void handle_call_join(Connection* conn, const CallJoinPayload* payload) {
         return;
     }
     
+    // Проверяем, не является ли уже участником
+    if (call_has_participant(call, conn)) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: ALREADY IN CALL %u", call_id);
+        send_error(conn, CLIENT_CALL_CONN_JOIN, error_msg);
+        return;
+    }
+    
+    // ДОБАВЛЕНА ДИАГНОСТИКА: проверяем возможность добавления
+    if (!call_can_add_participant(call)) {
+        char error_msg[128];
+        snprintf(error_msg, sizeof(error_msg), 
+                 "ERROR: CALL %u IS FULL (MAX_PARTICIPANTS=%d, CURRENT=%d)", 
+                 call_id, MAX_CALL_PARTICIPANTS, call_get_participant_count(call));
+        send_error(conn, CLIENT_CALL_CONN_JOIN, error_msg);
+        return;
+    }
+    
+    if (!connection_can_add_call(conn)) {
+        char error_msg[128];
+        snprintf(error_msg, sizeof(error_msg), 
+                 "ERROR: CONNECTION %d CANNOT JOIN MORE CALLS (MAX_CALLS=%d, CURRENT=%d)", 
+                 conn->fd, MAX_CONNECTION_CALLS, connection_get_call_count(conn));
+        send_error(conn, CLIENT_CALL_CONN_JOIN, error_msg);
+        return;
+    }
+    
     // Добавляем участника
     int result = call_add_participant(call, conn);
     if (result != 0) {
-        char error_msg[64];
+        char error_msg[128];
         snprintf(error_msg, sizeof(error_msg), "ERROR: FAILED TO JOIN CALL %u (code %d)", call_id, result);
         send_error(conn, CLIENT_CALL_CONN_JOIN, error_msg);
         return;
@@ -504,28 +532,7 @@ void handle_udp_handshake(const UDPHandshakePacket* packet, const struct sockadd
     printf("UDP handshake completed for connection %u\n", connection_id);
 }
 
-void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockaddr_in* src_addr) {
-    uint32_t call_id = ntohl(packet->call_id);
-    uint32_t stream_id = ntohl(packet->stream_id);
-    
-    // Находим стрим
-    Stream* stream = stream_find_by_id(stream_id);
-    if (!stream) {
-        printf("UDP stream packet: stream %u not found\n", stream_id);
-        return;
-    }
-    
-    // Для приватных стримов проверяем call_id
-    if (stream->call && stream->call->call_id != call_id) {
-        printf("UDP stream packet: call_id mismatch for stream %u\n", stream_id);
-        return;
-    }
-    
-    // Пересылаем пакет всем получателям
-    broadcast_to_stream_recipients(stream, 0, packet, sizeof(UDPStreamPacket), NULL);
-    
-    (void)src_addr; // Помечаем параметр как использованный
-}
+
 
 // ==================== ФУНКЦИИ ОТПРАВКИ СЕРВЕРА ====================
 
@@ -584,7 +591,18 @@ void send_stream_deleted(Stream* stream) {
     StreamIDPayload payload;
     payload.stream_id = htonl(stream->stream_id);
     
-    broadcast_to_stream_recipients(stream, SERVER_STREAM_DELETED, &payload, sizeof(payload), NULL);
+    // Создаем TCP-сообщение
+    uint8_t message[1 + sizeof(StreamIDPayload)];
+    message[0] = SERVER_STREAM_DELETED;
+    memcpy(message + 1, &payload, sizeof(payload));
+    
+    // Отправляем всем получателям через TCP
+    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
+        Connection* recipient = stream->recipients[i];
+        if (recipient) {
+            connection_send_message(recipient, message, sizeof(message));
+        }
+    }
 }
 
 void send_stream_joined(Connection* conn, Stream* stream) {
@@ -749,7 +767,18 @@ void send_call_stream_deleted(Call* call, Stream* stream) {
     payload.call_id = htonl(call->call_id);
     payload.stream_id = htonl(stream->stream_id);
     
-    broadcast_to_call_participants(call, SERVER_CALL_STREAM_DELETED, &payload, sizeof(payload), NULL);
+    // Создаем TCP-сообщение
+    uint8_t message[1 + sizeof(CallStreamPayload)];
+    message[0] = SERVER_CALL_STREAM_DELETED;
+    memcpy(message + 1, &payload, sizeof(payload));
+    
+    // Отправляем всем участникам звонка
+    for (int i = 0; i < MAX_CALL_PARTICIPANTS; i++) {
+        Connection* participant = call->participants[i];
+        if (participant) {
+            connection_send_message(participant, message, sizeof(message));
+        }
+    }
 }
 
 // ==================== СЛУЖЕБНЫЕ ФУНКЦИИ ====================
@@ -762,27 +791,50 @@ void handle_connection_closed(Connection* conn) {
     connection_delete(conn);
 }
 
-void broadcast_to_stream_recipients(Stream* stream, uint8_t message_type, const void* payload, size_t payload_len, Connection* exclude) {
-    if (!stream) return;
+void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockaddr_in* src_addr) {
+    uint32_t call_id = ntohl(packet->call_id);
+    uint32_t stream_id = ntohl(packet->stream_id);
     
-    // Создаем полное сообщение
-    uint8_t* message = malloc(1 + payload_len);
-    if (!message) return;
-    
-    message[0] = message_type;
-    if (payload_len > 0) {
-        memcpy(message + 1, payload, payload_len);
+    // Находим стрим
+    Stream* stream = stream_find_by_id(stream_id);
+    if (!stream) {
+        printf("UDP stream packet: stream %u not found\n", stream_id);
+        return;
     }
     
-    // Отправляем всем получателям кроме исключенного
-    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
-        Connection* recipient = stream->recipients[i];
-        if (recipient && recipient != exclude) {
-            connection_send_message(recipient, message, 1 + payload_len);
+    // ИСПРАВЛЕННАЯ ЛОГИКА: если call_id = 0 - публичный стрим, иначе проверяем приватный
+    if (call_id != 0) {
+        // Для приватных стримов проверяем call_id
+        if (stream->call && stream->call->call_id != call_id) {
+            printf("UDP stream packet: call_id mismatch for stream %u\n", stream_id);
+            return;
+        }
+    } else {
+        // Для публичных стримов проверяем, что стрим действительно публичный
+        if (stream->call != NULL) {
+            printf("UDP stream packet: stream %u is private but call_id=0\n", stream_id);
+            return;
         }
     }
     
-    free(message);
+    // Пересылаем пакет всем получателям
+    broadcast_to_stream_recipients(stream, packet, sizeof(UDPStreamPacket), NULL);
+    
+    (void)src_addr;
+}
+
+// И обновить определение broadcast_to_stream_recipients:
+void broadcast_to_stream_recipients(Stream* stream, const void* packet_data, size_t packet_len, Connection* exclude) {
+    if (!stream || !packet_data) return;
+    
+    // Для UDP-пакетов используем UDP-сокет, а не TCP!
+    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
+        Connection* recipient = stream->recipients[i];
+        if (recipient && recipient != exclude && connection_is_udp_handshake_complete(recipient)) {
+            // Отправляем через UDP-сокет на UDP-адрес получателя
+            udp_send_packet(g_udp_fd, packet_data, packet_len, &recipient->udp_addr);
+        }
+    }
 }
 
 void broadcast_to_call_participants(Call* call, uint8_t message_type, const void* payload, size_t payload_len, Connection* exclude) {

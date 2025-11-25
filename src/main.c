@@ -77,7 +77,6 @@ int handle_tcp_client(Connection* conn) {
         // Соединение закрыто клиентом
         printf("Connection closed by client: %s\n", connection_get_address_string(conn));
         handle_connection_closed(conn);
-        connection_delete(conn);
         return 0;
     } else if (result < 0) {
         if (result != -2) { // -2 означает EAGAIN/EWOULDBLOCK
@@ -85,7 +84,6 @@ int handle_tcp_client(Connection* conn) {
             fprintf(stderr, "Read error from %s, closing connection\n", 
                     connection_get_address_string(conn));
             handle_connection_closed(conn);
-            connection_delete(conn);
             return -1;
         }
         // EAGAIN/EWOULDBLOCK - нормально для неблокирующего сокета
