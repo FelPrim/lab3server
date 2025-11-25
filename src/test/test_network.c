@@ -7,8 +7,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
-#include "network.h"
+#include "../network.h"
 #include <fcntl.h>
+
+#include "../test_common.h"
 
 void test_set_nonblocking() {
     printf("=== Testing set_nonblocking ===\n");

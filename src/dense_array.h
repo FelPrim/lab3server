@@ -24,17 +24,13 @@
     _index; \
 })
 
-// Макрос для удаления элемента из плотного массива
-// Возвращает 0 при успехе, -1 если элемент не найден
+// ИСПРАВЛЕННЫЙ макрос для удаления элемента из плотного массива
+// Просто устанавливает элемент в NULL без сдвига - это безопаснее
 #define DENSE_ARRAY_REMOVE(array, size, element) ({ \
     int _result = -1; \
     for (size_t i = 0; i < (size); ++i) { \
         if ((array)[i] == (element)) { \
-            /* Сдвигаем все последующие элементы */ \
-            for (size_t j = i; j + 1 < (size); ++j) { \
-                (array)[j] = (array)[j + 1]; \
-            } \
-            (array)[(size) - 1] = NULL; \
+            (array)[i] = NULL; \
             _result = 0; \
             break; \
         } \
@@ -65,15 +61,24 @@
     _count; \
 })
 
-// Макрос для поиска элемента по предикату
-#define DENSE_ARRAY_FIND_BY(array, size, predicate, result) ({ \
+// ДОБАВЛЕН: Макрос для получения индекса элемента
+#define DENSE_ARRAY_INDEX_OF(array, size, element) ({ \
     int _index = -1; \
     for (size_t i = 0; i < (size); ++i) { \
-        if ((array)[i] != NULL && (predicate((array)[i]))) { \
-            *(result) = (array)[i]; \
+        if ((array)[i] == (element)) { \
             _index = (int)i; \
             break; \
         } \
     } \
     _index; \
 })
+
+// ДОБАВЛЕН: Макрос для безопасной итерации по ненулевым элементам
+#define DENSE_ARRAY_FOREACH(array, size, item, code) do { \
+    for (size_t i = 0; i < (size); ++i) { \
+        if ((array)[i] != NULL) { \
+            typeof((array)[0]) item = (array)[i]; \
+            code; \
+        } \
+    } \
+} while(0)

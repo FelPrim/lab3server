@@ -3,424 +3,805 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include "connection.h"
-#include "connection_logic.h"  // Добавлено для connection_detach_from_streams и connection_delete_owned_streams
+#include "connection.h"
 #include "stream.h"
-#include "stream_logic.h"  // Для stream_create, stream_add_recipient, stream_remove_recipient
+#include "stream.h"
+#include "call.h"
+#include "call.h"
 #include "network.h"
+#include "id_utils.h"
 
-// Глобальная переменная для UDP сокета
+// Глобальные переменные
 extern int g_udp_fd;
+extern int g_epoll_fd;
 
-// Вспомогательная функция для печати UDP адреса
-static void print_udp_addr(const UDPAddrPayload* addr) {
-    struct in_addr ip_addr;
-    ip_addr.s_addr = addr->ip;
-    printf("UDP %s:%d", inet_ntoa(ip_addr), ntohs(addr->port));
-}
+// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-// Вспомогательная функция для печати ID трансляции
 static void print_stream_id(uint32_t stream_id) {
-    printf("Stream %u", stream_id);
+    char str[7];
+    id_to_string(stream_id, str);
+    str[6] = '\0';
+    printf("Stream %s(%u)", str, stream_id);
 }
 
-// ==================== ОБРАБОТЧИКИ TCP СООБЩЕНИЙ ОТ КЛИЕНТА ====================
+static void print_call_id(uint32_t call_id) {
+    char str[7];
+    id_to_string(call_id, str);
+    str[6] = '\0';
+    printf("Call %s(%u)", str, call_id);
+}
+
+static void print_connection_id(const Connection* conn) {
+    printf("Connection %d", conn->fd);
+}
+
+// Функция для отправки сообщений об ошибке
+static void send_error(Connection* conn, uint8_t original_message, const char* error_msg) {
+    printf("Sending error: %s\n", error_msg);
+    
+    size_t msg_len = strlen(error_msg);
+    ErrorSuccessPayload payload;
+    payload.original_message_type = original_message;
+    payload.message_length = (uint8_t)msg_len;
+    
+    // Выделяем память для полного сообщения
+    size_t total_len = 1 + sizeof(ErrorSuccessPayload) + msg_len;
+    uint8_t* message = malloc(total_len);
+    if (!message) return;
+    
+    message[0] = SERVER_ERROR;
+    memcpy(message + 1, &payload, sizeof(payload));
+    memcpy(message + 1 + sizeof(payload), error_msg, msg_len);
+    
+    connection_send_message(conn, message, total_len);
+    free(message);
+}
+
+// Функция для отправки сообщений об успехе
+static void send_success(Connection* conn, uint8_t original_message, const char* success_msg) {
+    printf("Sending success: %s\n", success_msg);
+    
+    size_t msg_len = strlen(success_msg);
+    ErrorSuccessPayload payload;
+    payload.original_message_type = original_message;
+    payload.message_length = (uint8_t)msg_len;
+    
+    size_t total_len = 1 + sizeof(ErrorSuccessPayload) + msg_len;
+    uint8_t* message = malloc(total_len);
+    if (!message) return;
+    
+    message[0] = SERVER_SUCCESS;
+    memcpy(message + 1, &payload, sizeof(payload));
+    memcpy(message + 1 + sizeof(payload), success_msg, msg_len);
+    
+    connection_send_message(conn, message, total_len);
+    free(message);
+}
+
+// ==================== ОБРАБОТЧИКИ БАЗОВЫХ СООБЩЕНИЙ ====================
+
+// ИЗМЕНИТЬ: убрать неиспользуемый параметр conn
+void handle_client_error(const ErrorSuccessPayload* payload) {
+    char message[256];
+    if (payload->message_length > 0) {
+        size_t copy_len = payload->message_length;
+        if (copy_len >= sizeof(message)) {
+            copy_len = sizeof(message) - 1;
+        }
+        memcpy(message, (const uint8_t*)payload + sizeof(ErrorSuccessPayload), copy_len);
+        message[copy_len] = '\0';
+        printf("Client error (original msg 0x%02x): %s\n", 
+               payload->original_message_type, message);
+    }
+}
+
+// ИЗМЕНИТЬ: убрать неиспользуемый параметр conn
+void handle_client_success(const ErrorSuccessPayload* payload) {
+    char message[256];
+    if (payload->message_length > 0) {
+        size_t copy_len = payload->message_length;
+        if (copy_len >= sizeof(message)) {
+            copy_len = sizeof(message) - 1;
+        }
+        memcpy(message, (const uint8_t*)payload + sizeof(ErrorSuccessPayload), copy_len);
+        message[copy_len] = '\0';
+        printf("Client success (original msg 0x%02x): %s\n", 
+               payload->original_message_type, message);
+    }
+}
+
+
+// ==================== ОБРАБОТЧИКИ СТРИМОВ ====================
+
+void handle_stream_create(Connection* conn, const StreamCreatePayload* payload) {
+    printf("handle_stream_create: ");
+    print_connection_id(conn);
+    printf(", call_id=%u\n", ntohl(payload->call_id));
+    
+    uint32_t call_id = ntohl(payload->call_id);
+    Call* call = NULL;
+    
+    // Проверяем, приватный ли это стрим
+    if (call_id != 0) {
+        call = call_find_by_id(call_id);
+        if (!call) {
+            char error_msg[64];
+            snprintf(error_msg, sizeof(error_msg), "ERROR: COULDN'T FIND CALL WITH ID %u", call_id);
+            send_error(conn, CLIENT_STREAM_CREATE, error_msg);
+            return;
+        }
+        
+        // Проверяем, что соединение является участником звонка
+        if (!call_has_participant(call, conn)) {
+            char error_msg[64];
+            snprintf(error_msg, sizeof(error_msg), "ERROR: %u ISN'T A PARTICIPANT OF THE CALL %u", 
+                     conn->fd, call_id);
+            send_error(conn, CLIENT_STREAM_CREATE, error_msg);
+            return;
+        }
+    }
+    
+    // Создаем стрим
+    Stream* stream = stream_new(0, conn, call);
+    if (!stream) {
+        fprintf(stderr, "Failed to create stream in handle_stream_create\n");
+        send_error(conn, CLIENT_STREAM_CREATE, "ERROR: FAILED TO CREATE STREAM");
+        return;
+    }
+    
+    // Отправляем ответ
+    send_stream_created(conn, stream);
+    
+    // Если стрим приватный, уведомляем участников звонка
+    if (call) {
+        send_call_stream_new(call, stream);
+    }
+}
+
+
+void handle_stream_delete(Connection* conn, const StreamIDPayload* payload) {
+    uint32_t stream_id = ntohl(payload->stream_id);
+    printf("handle_stream_delete: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_stream_id(stream_id);
+    printf("\n");
+    
+    Stream* stream = stream_find_by_id(stream_id);
+    if (!stream) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: COULDN'T FIND STREAM WITH ID %u", stream_id);
+        send_error(conn, CLIENT_STREAM_DELETE, error_msg);
+        return;
+    }
+    
+    // Проверяем, что соединение является владельцем стрима
+    if (stream->owner != conn) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: %u ISN'T AN OWNER OF THE STREAM %u", 
+                 conn->fd, stream_id);
+        send_error(conn, CLIENT_STREAM_DELETE, error_msg);
+        return;
+    }
+    
+    Call* call = stream->call;
+    
+    // Уведомляем зрителей о удалении стрима
+    send_stream_deleted(stream);
+    
+    // Если стрим приватный, уведомляем участников звонка
+    if (call) {
+        send_call_stream_deleted(call, stream);
+    }
+    
+    // Удаляем стрим
+    stream_delete(stream);
+    
+    // Отправляем подтверждение
+    char success_msg[64];
+    snprintf(success_msg, sizeof(success_msg), "SUCCESS: deleted stream %u", stream_id);
+    send_success(conn, CLIENT_STREAM_DELETE, success_msg);
+}
+
+void handle_stream_join(Connection* conn, const StreamIDPayload* payload) {
+    uint32_t stream_id = ntohl(payload->stream_id);
+    printf("handle_stream_join: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_stream_id(stream_id);
+    printf("\n");
+    
+    Stream* stream = stream_find_by_id(stream_id);
+    if (!stream) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: COULDN'T FIND STREAM WITH ID %u", stream_id);
+        send_error(conn, CLIENT_STREAM_CONN_JOIN, error_msg);
+        return;
+    }
+    
+    // Для приватных стримов проверяем, что соединение в том же звонке
+    if (stream->call) {
+        if (!call_has_participant(stream->call, conn)) {
+            char error_msg[64];
+            snprintf(error_msg, sizeof(error_msg), "ERROR: NOT IN THE SAME CALL AS STREAM %u", stream_id);
+            send_error(conn, CLIENT_STREAM_CONN_JOIN, error_msg);
+            return;
+        }
+    }
+    
+    // Добавляем получателя
+    int result = stream_add_recipient(stream, conn);
+    if (result != 0) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: FAILED TO JOIN STREAM %u (code %d)", stream_id, result);
+        send_error(conn, CLIENT_STREAM_CONN_JOIN, error_msg);
+        return;
+    }
+    
+    // Отправляем подтверждение
+    send_stream_joined(conn, stream);
+    
+    // Если это первый зритель, уведомляем владельца
+    if (stream_get_recipient_count(stream) == 1) {
+        send_stream_start(stream);
+    }
+}
+
+void handle_stream_leave(Connection* conn, const StreamIDPayload* payload) {
+    uint32_t stream_id = ntohl(payload->stream_id);
+    printf("handle_stream_leave: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_stream_id(stream_id);
+    printf("\n");
+    
+    Stream* stream = stream_find_by_id(stream_id);
+    if (!stream) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: COULDN'T FIND STREAM WITH ID %u", stream_id);
+        send_error(conn, CLIENT_STREAM_CONN_LEAVE, error_msg);
+        return;
+    }
+    
+    // Удаляем получателя
+    int result = stream_remove_recipient(stream, conn);
+    if (result != 0) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: FAILED TO LEAVE STREAM %u (code %d)", stream_id, result);
+        send_error(conn, CLIENT_STREAM_CONN_LEAVE, error_msg);
+        return;
+    }
+    
+    // Если не осталось зрителей, уведомляем владельца
+    if (stream_get_recipient_count(stream) == 0) {
+        send_stream_end(stream);
+    }
+    
+    // Отправляем подтверждение
+    char success_msg[64];
+    snprintf(success_msg, sizeof(success_msg), "SUCCESS: left stream %u", stream_id);
+    send_success(conn, CLIENT_STREAM_CONN_LEAVE, success_msg);
+}
+
+// ==================== ОБРАБОТЧИКИ ЗВОНКОВ ====================
+
+void handle_call_create(Connection* conn) {
+    printf("handle_call_create: ");
+    print_connection_id(conn);
+    printf("\n");
+    
+    Call* call = call_new(0);
+    if (!call) {
+        send_error(conn, CLIENT_CALL_CREATE, "ERROR: FAILED TO CREATE CALL");
+        return;
+    }
+    
+    // Добавляем создателя как участника
+    if (call_add_participant(call, conn) != 0) {
+        call_delete(call);
+        send_error(conn, CLIENT_CALL_CREATE, "ERROR: FAILED TO ADD CREATOR TO CALL");
+        return;
+    }
+    
+    // Отправляем ответ
+    send_call_created(conn, call);
+}
+
+void handle_call_join(Connection* conn, const CallJoinPayload* payload) {
+    uint32_t call_id = ntohl(payload->call_id);
+    printf("handle_call_join: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_call_id(call_id);
+    printf("\n");
+    
+    Call* call = call_find_by_id(call_id);
+    if (!call) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: COULDN'T FIND CALL WITH ID %u", call_id);
+        send_error(conn, CLIENT_CALL_CONN_JOIN, error_msg);
+        return;
+    }
+    
+    // Добавляем участника
+    int result = call_add_participant(call, conn);
+    if (result != 0) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: FAILED TO JOIN CALL %u (code %d)", call_id, result);
+        send_error(conn, CLIENT_CALL_CONN_JOIN, error_msg);
+        return;
+    }
+    
+    // Отправляем ответ новому участнику
+    send_call_joined(conn, call);
+    
+    // Уведомляем других участников о новом участнике
+    send_call_conn_new(call, conn);
+}
+
+void handle_call_leave(Connection* conn, const CallJoinPayload* payload) {
+    uint32_t call_id = ntohl(payload->call_id);
+    printf("handle_call_leave: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_call_id(call_id);
+    printf("\n");
+    
+    Call* call = call_find_by_id(call_id);
+    if (!call) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: COULDN'T FIND CALL WITH ID %u", call_id);
+        send_error(conn, CLIENT_CALL_CONN_LEAVE, error_msg);
+        return;
+    }
+    
+    // Проверяем, что соединение является участником звонка
+    if (!call_has_participant(call, conn)) {
+        char error_msg[64];
+        snprintf(error_msg, sizeof(error_msg), "ERROR: %u ISN'T A PARTICIPANT OF THE CALL %u", 
+                 conn->fd, call_id);
+        send_error(conn, CLIENT_CALL_CONN_LEAVE, error_msg);
+        return;
+    }
+    
+    // Получаем все стримы, которыми владеет участник в этом звонке
+    Stream* owned_streams[MAX_CALL_STREAMS];
+    int owned_count = 0;
+    for (int i = 0; i < MAX_CALL_STREAMS; i++) {
+        if (call->streams[i] && call->streams[i]->owner == conn) {
+            owned_streams[owned_count++] = call->streams[i];
+        }
+    }
+    
+    // Удаляем участника из звонка
+    if (call_remove_participant(call, conn) != 0) {
+        send_error(conn, CLIENT_CALL_CONN_LEAVE, "ERROR: FAILED TO REMOVE FROM CALL");
+        return;
+    }
+    
+    // Удаляем стримы, которыми владел участник
+    for (int i = 0; i < owned_count; i++) {
+        send_stream_deleted(owned_streams[i]);
+        send_call_stream_deleted(call, owned_streams[i]);
+        stream_delete(owned_streams[i]);
+    }
+    
+    // Уведомляем других участников
+    send_call_conn_left(call, conn);
+    
+    // Если звонок пуст, удаляем его
+    if (call_get_participant_count(call) == 0) {
+        call_delete(call);
+    }
+    
+    // Отправляем подтверждение
+    char success_msg[64];
+    snprintf(success_msg, sizeof(success_msg), "SUCCESS: left call %u", call_id);
+    send_success(conn, CLIENT_CALL_CONN_LEAVE, success_msg);
+}
+
+// ==================== ГЛАВНЫЙ ДИСПЕТЧЕР СООБЩЕНИЙ ====================
 
 void handle_client_message(Connection* conn, uint8_t message_type, const uint8_t* payload, size_t payload_len) {
     printf("handle_client_message: conn_fd=%d, type=0x%02x, payload_len=%zu\n", 
            conn->fd, message_type, payload_len);
     
     switch (message_type) {
-        case CLIENT_UDP_ADDR:
-            if (payload_len >= sizeof(UDPAddrFullPayload)) {
-                handle_udp_addr(conn, (const UDPAddrFullPayload*) payload);
-            } else {
-                printf("ERROR: Invalid UDP addr payload size\n");
+        // Базовые сообщения
+        case CLIENT_ERROR:
+            if (payload_len >= sizeof(ErrorSuccessPayload)) {
+                handle_client_error((const ErrorSuccessPayload*)payload);
             }
             break;
-        case CLIENT_DISCONNECT:
-            handle_disconnect(conn);
+        case CLIENT_SUCCESS:
+            if (payload_len >= sizeof(ErrorSuccessPayload)) {
+                handle_client_success((const ErrorSuccessPayload*)payload);
+            }
             break;
+            
+        // Сообщения стримов
         case CLIENT_STREAM_CREATE:
-            handle_stream_create(conn);
+            if (payload_len >= sizeof(StreamCreatePayload)) {
+                handle_stream_create(conn, (const StreamCreatePayload*)payload);
+            }
             break;
         case CLIENT_STREAM_DELETE:
             if (payload_len >= sizeof(StreamIDPayload)) {
                 handle_stream_delete(conn, (const StreamIDPayload*)payload);
-            } else {
-                printf("ERROR: Invalid stream delete payload size\n");
             }
             break;
-        case CLIENT_STREAM_JOIN:
+        case CLIENT_STREAM_CONN_JOIN:
             if (payload_len >= sizeof(StreamIDPayload)) {
                 handle_stream_join(conn, (const StreamIDPayload*)payload);
-            } else {
-                printf("ERROR: Invalid stream join payload size\n");
             }
             break;
-        case CLIENT_STREAM_LEAVE:
+        case CLIENT_STREAM_CONN_LEAVE:
             if (payload_len >= sizeof(StreamIDPayload)) {
                 handle_stream_leave(conn, (const StreamIDPayload*)payload);
-            } else {
-                printf("ERROR: Invalid stream leave payload size\n");
             }
             break;
-        default:
-            printf("ERROR: Unknown message type 0x%02x\n", message_type);
+            
+        // Сообщения звонков
+        case CLIENT_CALL_CREATE:
+            handle_call_create(conn);
             break;
-    }
-}
-
-void handle_udp_addr(Connection* conn, const UDPAddrFullPayload* payload) {
-    printf("handle_udp_addr: conn_fd=%d\n", conn->fd);
-    
-    // Проверяем что это IPv4
-    if (ntohs(payload->family) != AF_INET) {
-        printf("ERROR: Invalid address family: %u (expected AF_INET=%d)\n", 
-               ntohs(payload->family), AF_INET);
-        return;
-    }
-    
-    struct sockaddr_in udp_addr;
-    memset(&udp_addr, 0, sizeof(udp_addr));
-    udp_addr.sin_family = AF_INET;
-    udp_addr.sin_port = payload->port;  // порт уже в сетевом порядке
-    
-    // ИСПРАВЛЕНИЕ: Правильная проверка IP 0.0.0.0
-    if (payload->ip == 0 || ntohl(payload->ip) == 0) {
-        printf("WARNING: Client sent 0.0.0.0 IP, using TCP connection IP instead\n");
-        udp_addr.sin_addr.s_addr = conn->tcp_addr.sin_addr.s_addr;
-    } else {
-        udp_addr.sin_addr.s_addr = payload->ip;  // IP уже в сетевом порядке
-    }
-    
-    connection_set_udp_addr(conn, &udp_addr);
-    
-    char addr_str[64];
-    sockaddr_to_string(&udp_addr, addr_str, sizeof(addr_str));
-    printf("Client %s set UDP address: %s\n", 
-           connection_get_address_string(conn), addr_str);
-}
-
-void handle_disconnect(Connection* conn) {
-    printf("handle_disconnect: conn_fd=%d\n", conn->fd);
-    // Заменяем cleanup_streams_on_disconnect на правильные функции
-    connection_detach_from_streams(conn);    // Отписываем от всех стримов как зритель
-    connection_delete_owned_streams(conn);   // Удаляем все стримы как владелец
-}
-
-void handle_stream_create(Connection* conn) {
-    printf("handle_stream_create: conn_fd=%d\n", conn->fd);
-    
-    // Заменяем create_stream_for_connection на stream_create
-    Stream* stream = stream_create(0, conn); // 0 - сгенерируется автоматически
-    
-    if (stream != NULL) {
-        send_stream_created(conn, stream);
-    } else {
-        printf("ERROR: Failed to create stream for connection %d\n", conn->fd);
-    }
-}
-
-void handle_stream_delete(Connection* conn, const StreamIDPayload* payload) {
-    printf("handle_stream_delete: conn_fd=%d, ", conn->fd);
-    print_stream_id(ntohl(payload->stream_id));
-    printf("\n");
-    
-    Stream* stream = stream_find_by_id(ntohl(payload->stream_id));
-    if (!stream) {
-        printf("ERROR: Stream not found\n");
-        return;
-    }
-    
-    // Проверяем, что соединение является владельцем трансляции
-    if (stream->owner != conn) {
-        printf("ERROR: Connection is not stream owner\n");
-        return;
-    }
-    
-    // Уведомляем всех получателей о закрытии трансляции
-    send_stream_deleted_to_recipients(stream);
-    
-    // Удаляем трансляцию через stream_logic (автоматически удаляет из реестра)
-    stream_destroy(stream);
-}
-
-void handle_stream_join(Connection* conn, const StreamIDPayload* payload) {
-    printf("handle_stream_join: conn_fd=%d, ", conn->fd);
-    print_stream_id(ntohl(payload->stream_id));
-    printf("\n");
-    
-    Stream* stream = stream_find_by_id(ntohl(payload->stream_id));
-    if (!stream) {
-        printf("ERROR: Stream not found\n");
-        send_join_result(conn, NULL, -1);
-        return;
-    }
-    
-    // Проверяем, не является ли уже получателем
-    if (stream_is_recipient_in_array(stream, conn)) {
-        printf("ERROR: Already recipient of this stream\n");
-        send_join_result(conn, stream, -2);
-        return;
-    }
-    
-    // Заменяем add_recipient_to_stream на stream_add_recipient
-    int result = stream_add_recipient(stream, conn);
-    send_join_result(conn, stream, result);
-    
-    if (result == 0) {
-        // Уведомляем владельца о новом получателе
-        if (stream->recipient_count == 1) {
-            send_stream_start_to_owner(stream);
-        }
-        
-        // Уведомляем других получателей о новом участнике
-        send_new_recipient_to_stream(stream, conn);
-    }
-}
-
-void handle_stream_leave(Connection* conn, const StreamIDPayload* payload) {
-    printf("handle_stream_leave: conn_fd=%d, ", conn->fd);
-    print_stream_id(ntohl(payload->stream_id));
-    printf("\n");
-    
-    Stream* stream = stream_find_by_id(ntohl(payload->stream_id));
-    if (!stream) {
-        printf("ERROR: Stream not found\n");
-        return;
-    }
-    
-    // Заменяем remove_recipient_from_stream на stream_remove_recipient
-    int result = stream_remove_recipient(stream, conn);
-    
-    if (result == 0) {
-        // Уведомляем других получателей о выходе участника
-        send_recipient_left_to_stream(stream, conn);
-        
-        // Уведомляем владельца если не осталось получателей
-        if (stream->recipient_count == 0) {
-            send_stream_end_to_owner(stream);
-        }
+        case CLIENT_CALL_CONN_JOIN:
+            if (payload_len >= sizeof(CallJoinPayload)) {
+                handle_call_join(conn, (const CallJoinPayload*)payload);
+            }
+            break;
+        case CLIENT_CALL_CONN_LEAVE:
+            if (payload_len >= sizeof(CallJoinPayload)) {
+                handle_call_leave(conn, (const CallJoinPayload*)payload);
+            }
+            break;
+            
+        default:
+            printf("ERROR: Unknown message type 0x%02x from connection %d\n", message_type, conn->fd);
+            break;
     }
 }
 
 // ==================== ОБРАБОТЧИКИ UDP ПАКЕТОВ ====================
 
 void handle_udp_packet(const uint8_t* data, size_t len, const struct sockaddr_in* src_addr) {
-    char ip_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &src_addr->sin_addr, ip_str, sizeof(ip_str));
-    
-    printf("🟢 UDP_PACKET_RECEIVED: from %s:%d, len=%zu", 
-           ip_str, ntohs(src_addr->sin_port), len);
-    
-    // Проверяем минимальный размер пакета (8 байт: 4 байта ID + 4 байта номера пакета)
-    if (len < 8) {
-        printf(" ❌ ERROR: UDP packet too small: %zu bytes\n", len);
+    if (len < UDP_HEADER_SIZE) {
+        printf("UDP packet too small: %zu bytes\n", len);
         return;
     }
     
-    // Извлекаем ID трансляции
-    uint32_t stream_id;
-    memcpy(&stream_id, data, 4);
-    stream_id = ntohl(stream_id);
-    printf(", stream_id=%u", stream_id);
-    
-    // Извлекаем номер пакета
-    uint32_t packet_number;
-    memcpy(&packet_number, data + 4, 4);
-    packet_number = ntohl(packet_number);
-    printf(", packet_number=%u", packet_number);
-    
-    // Дополнительная информация о пакете
-    printf(", data_size=%zu", len - 8); // минус заголовок
-    
-    // Находим трансляцию
-    Stream* stream = stream_find_by_id(stream_id);
-    if (!stream) {
-        printf(" ❌ ERROR: Stream %u not found\n", stream_id);
-        return;
+    // Определяем тип пакета по первым байтам
+    if (len >= sizeof(UDPHandshakePacket) && memcmp(data, "\0\0\0\0\0\0\0\0", 8) == 0) {
+        handle_udp_handshake((const UDPHandshakePacket*)data, src_addr);
+    } else {
+        handle_udp_stream_packet((const UDPStreamPacket*)data, src_addr);
     }
-    
-    printf(" ✅ Stream found");
-    
-    // Логируем информацию о стриме
-    printf(", owner=%s", connection_get_address_string(stream->owner));
-    printf(", recipients_count=%u", stream->recipient_count);
-    
-    // Пересылаем пакет всем получателям
-    int sent_count = 0;
-    for (uint32_t i = 0; i < stream->recipient_count; i++) {
-        Connection* recipient = stream->recipients[i];
-        if (connection_has_udp(recipient)) {
-            char recipient_ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &recipient->udp_addr.sin_addr, recipient_ip, sizeof(recipient_ip));
-            
-            printf(" → Sending to recipient[%d]: %s:%d", 
-                   i, recipient_ip, ntohs(recipient->udp_addr.sin_port));
-            
-            // Используем глобальный UDP сокет
-            int result = udp_send_packet(g_udp_fd, data, len, &recipient->udp_addr);
-            
-            if (result > 0) {
-                printf(" ✅");
-                sent_count++;
-            } else if (result == -2) {
-                printf(" ⚠️ EAGAIN");
-            } else {
-                printf(" ❌ FAILED");
-            }
-        } else {
-            printf(" → Recipient[%d] has no UDP addr", i);
-        }
-    }
-    
-    printf(" | Sent: %d/%d recipients\n", sent_count, stream->recipient_count);
 }
 
-// ==================== ФУНКЦИИ ОТПРАВКИ ОТВЕТОВ КЛИЕНТАМ ====================
+void handle_udp_handshake(const UDPHandshakePacket* packet, const struct sockaddr_in* src_addr) {
+    uint32_t connection_id = ntohl(packet->connection_id);
+    printf("UDP handshake: connection_id=%u\n", connection_id);
+    
+    Connection* conn = connection_find(connection_id);
+    if (!conn) {
+        printf("UDP handshake: connection %u not found\n", connection_id);
+        return;
+    }
+    
+    // Проверяем, что IP адрес совпадает с TCP соединением
+    if (conn->tcp_addr.sin_addr.s_addr != src_addr->sin_addr.s_addr) {
+        printf("UDP handshake: IP mismatch for connection %u\n", connection_id);
+        return;
+    }
+    
+    // Сохраняем UDP адрес (с портом)
+    connection_set_udp_addr(conn, src_addr);
+    connection_set_udp_handshake_complete(conn);
+    
+    // Отправляем подтверждение
+    send_server_handshake_end(conn);
+    
+    printf("UDP handshake completed for connection %u\n", connection_id);
+}
 
-void send_stream_created(Connection* conn, const Stream* stream) {
-    printf("send_stream_created: to conn_fd=%d, ", conn->fd);
+void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockaddr_in* src_addr) {
+    uint32_t call_id = ntohl(packet->call_id);
+    uint32_t stream_id = ntohl(packet->stream_id);
+    
+    // Находим стрим
+    Stream* stream = stream_find_by_id(stream_id);
+    if (!stream) {
+        printf("UDP stream packet: stream %u not found\n", stream_id);
+        return;
+    }
+    
+    // Для приватных стримов проверяем call_id
+    if (stream->call && stream->call->call_id != call_id) {
+        printf("UDP stream packet: call_id mismatch for stream %u\n", stream_id);
+        return;
+    }
+    
+    // Пересылаем пакет всем получателям
+    broadcast_to_stream_recipients(stream, 0, packet, sizeof(UDPStreamPacket), NULL);
+    
+    (void)src_addr; // Помечаем параметр как использованный
+}
+
+// ==================== ФУНКЦИИ ОТПРАВКИ СЕРВЕРА ====================
+
+void send_server_handshake_start(Connection* conn) {
+    printf("send_server_handshake_start: ");
+    print_connection_id(conn);
+    printf("\n");
+    
+    HandshakeStartPayload payload;
+    payload.connection_id = htonl(conn->fd);
+    
+    uint8_t message[1 + sizeof(HandshakeStartPayload)];
+    message[0] = SERVER_HANDSHAKE_START;
+    memcpy(message + 1, &payload, sizeof(payload));
+    
+    connection_send_message(conn, message, sizeof(message));
+}
+
+void send_server_handshake_end(Connection* conn) {
+    printf("send_server_handshake_end: ");
+    print_connection_id(conn);
+    printf("\n");
+    
+    HandshakeStartPayload payload;  // Используем ту же структуру, что и для START
+    payload.connection_id = htonl(conn->fd);
+    
+    uint8_t message[1 + sizeof(HandshakeStartPayload)];
+    message[0] = SERVER_HANDSHAKE_END;
+    memcpy(message + 1, &payload, sizeof(payload));
+    
+    connection_send_message(conn, message, sizeof(message));
+}
+
+void send_stream_created(Connection* conn, Stream* stream) {
+    printf("send_stream_created: ");
+    print_connection_id(conn);
+    printf(", ");
     print_stream_id(stream->stream_id);
     printf("\n");
     
     StreamIDPayload payload;
     payload.stream_id = htonl(stream->stream_id);
     
-    uint8_t message[5];
+    uint8_t message[1 + sizeof(StreamIDPayload)];
     message[0] = SERVER_STREAM_CREATED;
-    memcpy(&message[1], &payload, sizeof(payload));
+    memcpy(message + 1, &payload, sizeof(payload));
     
-    printf("DEBUG: Sending SERVER_STREAM_CREATED: type=0x%02x, stream_id=%u\n",
-           message[0], ntohl(payload.stream_id));
-    
-    // Отправляем сообщение
     connection_send_message(conn, message, sizeof(message));
-    
-    // НЕМЕДЛЕННАЯ отправка данных
-    printf("DEBUG: Immediate flush for fd=%d\n", conn->fd);
-    connection_write_data(conn);
-    
-    // Принудительно добавляем EPOLLOUT если есть данные
-    if (conn->write_buffer.position > 0) {
-        printf("DEBUG: Still data in buffer, adding EPOLLOUT for fd=%d\n", conn->fd);
-        epoll_modify(g_epoll_fd, conn->fd, EPOLLIN | EPOLLOUT | EPOLLET);
-    }
 }
 
-void send_stream_deleted_to_recipients(const Stream* stream) {
-    printf("send_stream_deleted_to_recipients: ");
-    print_stream_id(stream->stream_id);
-    printf(", recipient_count=%u\n", stream->recipient_count);
-    
-    StreamIDPayload payload;
-    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
-    
-    broadcast_to_stream(stream, SERVER_STREAM_DELETED, &payload, sizeof(payload), NULL);
-}
-
-void send_join_result(Connection* conn, const Stream* stream, int result) {
-    printf("send_join_result: to conn_fd=%d, result=%d\n", conn->fd, result);
-    
-    if (stream && result == 0) {
-        // Успешное присоединение
-        StreamIDPayload payload;
-        payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
-        
-        uint8_t message[5];
-        message[0] = SERVER_STREAM_JOINED;
-        memcpy(&message[1], &payload, sizeof(payload));
-        connection_send_message(conn, message, sizeof(message));
-    } else {
-        // Ошибка присоединения - отправляем сообщение без payload
-        uint8_t message[1] = {SERVER_STREAM_JOINED};
-        connection_send_message(conn, message, 1);
-    }
-}
-
-void send_stream_start_to_owner(const Stream* stream) {
-    printf("send_stream_start_to_owner: ");
+void send_stream_deleted(Stream* stream) {
+    printf("send_stream_deleted: ");
     print_stream_id(stream->stream_id);
     printf("\n");
     
     StreamIDPayload payload;
-    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
+    payload.stream_id = htonl(stream->stream_id);
     
-    uint8_t message[5];
+    broadcast_to_stream_recipients(stream, SERVER_STREAM_DELETED, &payload, sizeof(payload), NULL);
+}
+
+void send_stream_joined(Connection* conn, Stream* stream) {
+    printf("send_stream_joined: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_stream_id(stream->stream_id);
+    printf("\n");
+    
+    StreamIDPayload payload;
+    payload.stream_id = htonl(stream->stream_id);
+    
+    uint8_t message[1 + sizeof(StreamIDPayload)];
+    message[0] = SERVER_STREAM_CONN_JOINED;
+    memcpy(message + 1, &payload, sizeof(payload));
+    
+    connection_send_message(conn, message, sizeof(message));
+}
+
+void send_stream_start(Stream* stream) {
+    printf("send_stream_start: ");
+    print_stream_id(stream->stream_id);
+    printf("\n");
+    
+    StreamIDPayload payload;
+    payload.stream_id = htonl(stream->stream_id);
+    
+    uint8_t message[1 + sizeof(StreamIDPayload)];
     message[0] = SERVER_STREAM_START;
-    memcpy(&message[1], &payload, sizeof(payload));
+    memcpy(message + 1, &payload, sizeof(payload));
     
-    connection_send_message(stream->owner, message, sizeof(message));
+    // Приводим тип для устранения предупреждения
+    connection_send_message((Connection*)stream->owner, message, sizeof(message));
 }
 
-void send_stream_end_to_owner(const Stream* stream) {
-    printf("send_stream_end_to_owner: ");
+void send_stream_end(Stream* stream) {
+    printf("send_stream_end: ");
     print_stream_id(stream->stream_id);
     printf("\n");
     
     StreamIDPayload payload;
-    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
+    payload.stream_id = htonl(stream->stream_id);
     
-    uint8_t message[5];
+    uint8_t message[1 + sizeof(StreamIDPayload)];
     message[0] = SERVER_STREAM_END;
-    memcpy(&message[1], &payload, sizeof(payload));
+    memcpy(message + 1, &payload, sizeof(payload));
     
-    connection_send_message(stream->owner, message, sizeof(message));
+    // Приводим тип для устранения предупреждения
+    connection_send_message((Connection*)stream->owner, message, sizeof(message));
 }
 
-void send_new_recipient_to_stream(const Stream* stream, const Connection* new_recipient) {
-    printf("send_new_recipient_to_stream: ");
-    print_stream_id(stream->stream_id);
-    printf(", new_recipient_fd=%d\n", new_recipient->fd);
+void send_call_created(Connection* conn, Call* call) {
+    printf("send_call_created: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_call_id(call->call_id);
+    printf("\n");
     
-    RecipientNotificationPayload payload;
-    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
-    payload.recipient_addr.port = new_recipient->udp_addr.sin_port;
-    payload.recipient_addr.ip = new_recipient->udp_addr.sin_addr.s_addr;
+    IDPayload payload;
+    payload.id = htonl(call->call_id);
     
-    broadcast_to_stream(stream, SERVER_NEW_RECIPIENT, &payload, sizeof(payload), new_recipient);
+    uint8_t message[1 + sizeof(IDPayload)];
+    message[0] = SERVER_CALL_CREATED;
+    memcpy(message + 1, &payload, sizeof(payload));
+    
+    connection_send_message(conn, message, sizeof(message));
 }
 
-void send_recipient_left_to_stream(const Stream* stream, const Connection* left_recipient) {
-    printf("send_recipient_left_to_stream: ");
+void send_call_joined(Connection* conn, Call* call) {
+    printf("send_call_joined: ");
+    print_connection_id(conn);
+    printf(", ");
+    print_call_id(call->call_id);
+    printf("\n");
+    
+    // Подготавливаем данные участников и стримов
+    int participant_count = call_get_participant_count(call);
+    int stream_count = call_get_stream_count(call);
+    
+    CallJoinedPayload header;
+    header.call_id = htonl(call->call_id);
+    header.participant_count = (uint8_t)participant_count;
+    header.stream_count = (uint8_t)stream_count;
+    
+    // Вычисляем общий размер
+    size_t total_size = 1 + sizeof(CallJoinedPayload) + 
+                       participant_count * sizeof(uint32_t) + 
+                       stream_count * sizeof(uint32_t);
+    
+    uint8_t* message = malloc(total_size);
+    if (!message) return;
+    
+    message[0] = SERVER_CALL_CONN_JOINED;
+    memcpy(message + 1, &header, sizeof(header));
+    
+    // Копируем участников
+    uint32_t* participants_ptr = (uint32_t*)(message + 1 + sizeof(header));
+    for (int i = 0; i < MAX_CALL_PARTICIPANTS; i++) {
+        if (call->participants[i]) {
+            *participants_ptr++ = htonl(call->participants[i]->fd);
+        }
+    }
+    
+    // Копируем стримы
+    uint32_t* streams_ptr = participants_ptr;
+    for (int i = 0; i < MAX_CALL_STREAMS; i++) {
+        if (call->streams[i]) {
+            *streams_ptr++ = htonl(call->streams[i]->stream_id);
+        }
+    }
+    
+    connection_send_message(conn, message, total_size);
+    free(message);
+}
+
+void send_call_conn_new(Call* call, Connection* new_conn) {
+    printf("send_call_conn_new: ");
+    print_call_id(call->call_id);
+    printf(", new_conn=%d\n", new_conn->fd);
+    
+    CallConnPayload payload;
+    payload.call_id = htonl(call->call_id);
+    payload.connection_id = htonl(new_conn->fd);
+    
+    broadcast_to_call_participants(call, SERVER_CALL_CONN_NEW, &payload, sizeof(payload), new_conn);
+}
+
+void send_call_conn_left(Call* call, Connection* left_conn) {
+    printf("send_call_conn_left: ");
+    print_call_id(call->call_id);
+    printf(", left_conn=%d\n", left_conn->fd);
+    
+    CallConnPayload payload;
+    payload.call_id = htonl(call->call_id);
+    payload.connection_id = htonl(left_conn->fd);
+    
+    broadcast_to_call_participants(call, SERVER_CALL_CONN_LEFT, &payload, sizeof(payload), left_conn);
+}
+
+void send_call_stream_new(Call* call, Stream* stream) {
+    printf("send_call_stream_new: ");
+    print_call_id(call->call_id);
+    printf(", ");
     print_stream_id(stream->stream_id);
-    printf(", left_recipient_fd=%d\n", left_recipient->fd);
+    printf("\n");
     
-    RecipientNotificationPayload payload;
-    payload.stream_id = htonl(stream->stream_id);  // Исправлено: добавляем htonl
-    payload.recipient_addr.port = left_recipient->udp_addr.sin_port;
-    payload.recipient_addr.ip = left_recipient->udp_addr.sin_addr.s_addr;
+    CallStreamPayload payload;
+    payload.call_id = htonl(call->call_id);
+    payload.stream_id = htonl(stream->stream_id);
     
-    broadcast_to_stream(stream, SERVER_RECIPIENT_LEFT, &payload, sizeof(payload), left_recipient);
+    broadcast_to_call_participants(call, SERVER_CALL_STREAM_NEW, &payload, sizeof(payload), NULL);
+}
+
+void send_call_stream_deleted(Call* call, Stream* stream) {
+    printf("send_call_stream_deleted: ");
+    print_call_id(call->call_id);
+    printf(", ");
+    print_stream_id(stream->stream_id);
+    printf("\n");
+    
+    CallStreamPayload payload;
+    payload.call_id = htonl(call->call_id);
+    payload.stream_id = htonl(stream->stream_id);
+    
+    broadcast_to_call_participants(call, SERVER_CALL_STREAM_DELETED, &payload, sizeof(payload), NULL);
 }
 
 // ==================== СЛУЖЕБНЫЕ ФУНКЦИИ ====================
 
 void handle_connection_closed(Connection* conn) {
-    printf("handle_connection_closed: conn_fd=%d\n", conn->fd);
-    // Заменяем cleanup_streams_on_disconnect на правильные функции
-    connection_detach_from_streams(conn);    // Отписываем от всех стримов как зритель
-    connection_delete_owned_streams(conn);   // Удаляем все стримы как владелец
+    printf("handle_connection_closed: ");
+    print_connection_id(conn);
+    printf("\n");
+    
+    connection_delete(conn);
 }
 
-void broadcast_to_stream(const Stream* stream, uint8_t message_type, const void* payload, size_t payload_len, const Connection* exclude) {
-    printf("broadcast_to_stream: ");
-    print_stream_id(stream->stream_id);
-    printf(", type=0x%02x, payload_len=%zu, exclude_fd=%d\n", 
-           message_type, payload_len, exclude ? exclude->fd : -1);
+void broadcast_to_stream_recipients(Stream* stream, uint8_t message_type, const void* payload, size_t payload_len, Connection* exclude) {
+    if (!stream) return;
     
     // Создаем полное сообщение
     uint8_t* message = malloc(1 + payload_len);
     if (!message) return;
     
     message[0] = message_type;
-    memcpy(&message[1], payload, payload_len);
+    if (payload_len > 0) {
+        memcpy(message + 1, payload, payload_len);
+    }
     
     // Отправляем всем получателям кроме исключенного
-    for (uint32_t i = 0; i < stream->recipient_count; i++) {
+    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
         Connection* recipient = stream->recipients[i];
-        if (recipient != exclude) {
+        if (recipient && recipient != exclude) {
             connection_send_message(recipient, message, 1 + payload_len);
+        }
+    }
+    
+    free(message);
+}
+
+void broadcast_to_call_participants(Call* call, uint8_t message_type, const void* payload, size_t payload_len, Connection* exclude) {
+    if (!call) return;
+    
+    // Создаем полное сообщение
+    uint8_t* message = malloc(1 + payload_len);
+    if (!message) return;
+    
+    message[0] = message_type;
+    if (payload_len > 0) {
+        memcpy(message + 1, payload, payload_len);
+    }
+    
+    // Отправляем всем участникам кроме исключенного
+    for (int i = 0; i < MAX_CALL_PARTICIPANTS; i++) {
+        Connection* participant = call->participants[i];
+        if (participant && participant != exclude) {
+            connection_send_message(participant, message, 1 + payload_len);
         }
     }
     

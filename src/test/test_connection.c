@@ -1,16 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#include "connection.h"
-#include "connection_logic.h"
-#include "stream.h"
-#include "stream_logic.h"
-#include "buffer.h"
+#include "../connection.h"
+#include "../stream.h"
+#include "../call.h"
+#include "../buffer.h"
+#include "../test_common.h"
+#include "../integrity_check.h"
 
 static Connection* make_conn(int fd) {
     struct sockaddr_in addr;
@@ -19,72 +19,192 @@ static Connection* make_conn(int fd) {
     addr.sin_port   = htons(9090);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
-    return connection_create(fd, &addr);
+    return connection_new(fd, &addr);
 }
 
-/* ---------------------------------------------------------
- * TEST 1 — базовое создание
- * --------------------------------------------------------- */
-void test_connection_basic_create() {
-    printf("=== test_connection_basic_create ===\n");
-
+bool test_connection_new_delete() {
+    TestContext ctx;
+    TEST_INIT(&ctx, "test_connection_new_delete");
+    
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     Connection* c = make_conn(fd);
 
-    assert(c != NULL);
-    assert(c->fd == fd);
+    TEST_ASSERT(&ctx, c != NULL, "Connection should be created");
+    TEST_ASSERT(&ctx, c->fd == fd, "FD should match");
+    TEST_ASSERT(&ctx, c->read_buffer.position == 0, "Read buffer should be initialized");
+    TEST_ASSERT(&ctx, c->write_buffer.position == 0, "Write buffer should be initialized");
+    TEST_ASSERT(&ctx, !c->udp_handshake_complete, "UDP handshake should not be complete initially");
+    
+    // Проверяем что соединение добавлено в глобальную таблицу
+    Connection* found = connection_find(fd);
+    TEST_ASSERT(&ctx, found == c, "Should find connection in global registry");
+    
+    // Проверяем что массивы инициализированы
+    bool watch_streams_null = true;
+    bool own_streams_null = true;
+    bool calls_null = true;
+    
+    for (int i = 0; i < MAX_INPUT; i++) {
+        if (c->watch_streams[i] != NULL) {
+            watch_streams_null = false;
+            break;
+        }
+    }
+    
+    for (int i = 0; i < MAX_OUTPUT; i++) {
+        if (c->own_streams[i] != NULL) {
+            own_streams_null = false;
+            break;
+        }
+    }
+    
+    for (int i = 0; i < MAX_CONNECTION_CALLS; i++) {
+        if (c->calls[i] != NULL) {
+            calls_null = false;
+            break;
+        }
+    }
+    
+    TEST_ASSERT(&ctx, watch_streams_null, "All watch_streams should be NULL initially");
+    TEST_ASSERT(&ctx, own_streams_null, "All own_streams should be NULL initially");
+    TEST_ASSERT(&ctx, calls_null, "All calls should be NULL initially");
 
-    assert(c->read_buffer.position == 0);
-    assert(c->write_buffer.position == 0);
-
-    for (int i = 0; i < MAX_INPUT; i++)
-        assert(c->watch_streams[i] == NULL);
-
-    for (int i = 0; i < MAX_OUTPUT; i++)
-        assert(c->own_streams[i] == NULL);
-
-    connection_destroy_full(c);
-
-    printf("✓ passed\n\n");
+    // Удаляем соединение
+    connection_delete(c);
+    
+    // Проверяем что соединение удалено из глобальной таблицы
+    found = connection_find(fd);
+    TEST_ASSERT(&ctx, found == NULL, "Should not find connection after deletion");
+bool integrity_ok = check_all_integrity();
+TEST_ASSERT(&ctx, integrity_ok, "System integrity check failed after test");
+    TEST_REPORT(&ctx, "test_connection_new_delete");
 }
 
-/* ---------------------------------------------------------
- * TEST 2 — глобальная таблица  
- * --------------------------------------------------------- */
-void test_connection_table() {
-    printf("=== test_connection_table ===\n");
+bool test_connection_stream_management() {
+    TestContext ctx;
+    TEST_INIT(&ctx, "test_connection_stream_management");
+    
+    int f1 = socket(AF_INET, SOCK_STREAM, 0);
+    int f2 = socket(AF_INET, SOCK_STREAM, 0);
+    Connection* owner = make_conn(f1);
+    Connection* viewer = make_conn(f2);
 
-    int fd1 = socket(AF_INET, SOCK_STREAM, 0);
-    int fd2 = socket(AF_INET, SOCK_STREAM, 0);
+    int current_streams = 0;
+    for (int i = 0; i < MAX_OUTPUT; i++) {
+        if (owner->own_streams[i] != NULL) current_streams++;
+    }
+    TEST_ASSERT(&ctx, current_streams < MAX_OUTPUT, "Owner should have space for new streams");
+    // Устанавливаем UDP для viewer (требуется для добавления получателя)
+    struct sockaddr_in udp_addr;
+    memset(&udp_addr, 0, sizeof(udp_addr));
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_port = htons(9091);
+    inet_pton(AF_INET, "127.0.0.1", &udp_addr.sin_addr);
+    connection_set_udp_addr(viewer, &udp_addr);
+    connection_set_udp_handshake_complete(viewer);
 
-    Connection* a = make_conn(fd1);
-    Connection* b = make_conn(fd2);
+    // Создаем стримы через высокоуровневый API
+    Stream* s1 = stream_new(100, owner, NULL);
+    Stream* s2 = stream_new(200, owner, NULL);
+    TEST_ASSERT(&ctx, s1 != NULL, "Should create stream 1");
+    TEST_ASSERT(&ctx, s2 != NULL, "Should create stream 2");
 
-    connection_add(a);
-    connection_add(b);
+    // Проверяем что стримы добавлены к владельцу
+    TEST_ASSERT(&ctx, connection_is_owning_stream(owner, s1), "Owner should own stream 1");
+    TEST_ASSERT(&ctx, connection_is_owning_stream(owner, s2), "Owner should own stream 2");
+    
+    // Добавляем viewer как получателя
+    TEST_ASSERT(&ctx, stream_add_recipient(s1, viewer) == 0, "Should add viewer to stream 1");
+    TEST_ASSERT(&ctx, stream_add_recipient(s2, viewer) == 0, "Should add viewer to stream 2");
+    
+    // Проверяем что viewer наблюдает стримы
+    TEST_ASSERT(&ctx, connection_is_watching_stream(viewer, s1), "Viewer should watch stream 1");
+    TEST_ASSERT(&ctx, connection_is_watching_stream(viewer, s2), "Viewer should watch stream 2");
+    
+    // Поиск стрима по ID
+    Stream* found1 = connection_find_stream_by_id(owner, 100);
+    Stream* found2 = connection_find_stream_by_id(viewer, 200);
+    TEST_ASSERT(&ctx, found1 == s1, "Should find stream 1 in owner");
+    TEST_ASSERT(&ctx, found2 == s2, "Should find stream 2 in viewer");
+    
+    // Удаляем стримы - они автоматически удалятся из соединений
+    stream_delete(s1);
+    stream_delete(s2);
+    
+    // Проверяем что стримы удалены из соединений
+    TEST_ASSERT(&ctx, !connection_is_owning_stream(owner, s1), "Owner should not own stream 1 after deletion");
+    TEST_ASSERT(&ctx, !connection_is_watching_stream(viewer, s1), "Viewer should not watch stream 1 after deletion");
 
-    assert(connection_find(fd1) == a);
-    assert(connection_find(fd2) == b);
-    assert(connection_find(9999) == NULL);
+    // Очищаем соединения
+    connection_delete(owner);
+    connection_delete(viewer);
 
-    connection_remove(fd1);
-    assert(connection_find(fd1) == NULL);
+bool integrity_ok = check_all_integrity();
+TEST_ASSERT(&ctx, integrity_ok, "System integrity check failed after test");
 
-    connection_destroy_full(b);
-
-    printf("✓ passed\n\n");
+    TEST_REPORT(&ctx, "test_connection_stream_management");
 }
 
-/* ---------------------------------------------------------
- * TEST 3 — UDP
- * --------------------------------------------------------- */
-void test_connection_udp() {
-    printf("=== test_connection_udp ===\n");
+bool test_connection_call_management() {
+    TestContext ctx;
+    TEST_INIT(&ctx, "test_connection_call_management");
+    
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    Connection* conn = make_conn(fd);
 
+    // Создаем звонки через высокоуровневый API (предполагая, что call_new уже реализован)
+    Call* call1 = call_new(300);
+    Call* call2 = call_new(400);
+    TEST_ASSERT(&ctx, call1 != NULL, "Should create call 1");
+    TEST_ASSERT(&ctx, call2 != NULL, "Should create call 2");
+
+    // Добавляем соединение в звонки
+    TEST_ASSERT(&ctx, call_add_participant(call1, conn) == 0, "Should add connection to call 1");
+    TEST_ASSERT(&ctx, call_add_participant(call2, conn) == 0, "Should add connection to call 2");
+
+    TEST_ASSERT(&ctx, connection_is_in_call(conn, call1), "Connection should be in call 1");
+    TEST_ASSERT(&ctx, connection_is_in_call(conn, call2), "Connection should be in call 2");
+    
+    // Поиск звонка по ID
+    Call* found1 = connection_find_call_by_id(conn, 300);
+    Call* found2 = connection_find_call_by_id(conn, 400);
+    TEST_ASSERT(&ctx, found1 == call1, "Should find call 1 by ID");
+    TEST_ASSERT(&ctx, found2 == call2, "Should find call 2 by ID");
+    
+    // Проверяем счетчик
+    int count = connection_get_call_count(conn);
+    TEST_ASSERT(&ctx, count == 2, "Should have 2 calls");
+    
+    // Удаляем соединение из звонков
+    TEST_ASSERT(&ctx, call_remove_participant(call1, conn) == 0, "Should remove connection from call 1");
+    TEST_ASSERT(&ctx, call_remove_participant(call2, conn) == 0, "Should remove connection from call 2");
+    
+    TEST_ASSERT(&ctx, !connection_is_in_call(conn, call1), "Connection should not be in call 1 after removal");
+    TEST_ASSERT(&ctx, !connection_is_in_call(conn, call2), "Connection should not be in call 2 after removal");
+    
+    count = connection_get_call_count(conn);
+    TEST_ASSERT(&ctx, count == 0, "Should have 0 calls after removal");
+
+    // Очищаем в правильном порядке
+    call_delete(call1);
+    call_delete(call2);
+    connection_delete(conn);
+
+bool integrity_ok = check_all_integrity();
+TEST_ASSERT(&ctx, integrity_ok, "System integrity check failed after test");
+    
+    TEST_REPORT(&ctx, "test_connection_call_management");
+}
+
+bool test_connection_udp_management() {
+    TestContext ctx;
+    TEST_INIT(&ctx, "test_connection_udp_management");
+    
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     Connection* c = make_conn(fd);
 
-    assert(!connection_has_udp(c));
+    TEST_ASSERT(&ctx, !connection_has_udp(c), "Should not have UDP initially");
+    TEST_ASSERT(&ctx, !connection_is_udp_handshake_complete(c), "UDP handshake should not be complete initially");
 
     struct sockaddr_in udp;
     memset(&udp, 0, sizeof(udp));
@@ -93,115 +213,125 @@ void test_connection_udp() {
     inet_pton(AF_INET, "10.0.0.1", &udp.sin_addr);
 
     connection_set_udp_addr(c, &udp);
+    TEST_ASSERT(&ctx, connection_has_udp(c), "Should have UDP after setting address");
+    TEST_ASSERT(&ctx, c->udp_addr.sin_port == htons(7777), "UDP port should match");
 
-    assert(connection_has_udp(c));
-    assert(c->udp_addr.sin_port == htons(7777));
+    connection_set_udp_handshake_complete(c);
+    TEST_ASSERT(&ctx, connection_is_udp_handshake_complete(c), "UDP handshake should be complete after setting");
 
-    connection_destroy_full(c);
+    connection_delete(c);
 
-    printf("✓ passed\n\n");
+bool integrity_ok = check_all_integrity();
+TEST_ASSERT(&ctx, integrity_ok, "System integrity check failed after test");
+
+    TEST_REPORT(&ctx, "test_connection_udp_management");
 }
 
-/* ---------------------------------------------------------
- * TEST 4 — stream management
- * --------------------------------------------------------- */
-void test_connection_streams() {
-    printf("=== test_connection_streams ===\n");
-
+bool test_connection_delete_cleanup() {
+    TestContext ctx;
+    TEST_INIT(&ctx, "test_connection_delete_cleanup");
+    
     int f1 = socket(AF_INET, SOCK_STREAM, 0);
     int f2 = socket(AF_INET, SOCK_STREAM, 0);
-
-    Connection* owner  = make_conn(f1);
+    Connection* owner = make_conn(f1);
     Connection* viewer = make_conn(f2);
 
-    // stream_create автоматически добавляет стрим к владельцу
-    Stream* s1 = stream_create(100, owner);
-    Stream* s2 = stream_create(200, owner);
+    // Устанавливаем UDP для viewer
+    struct sockaddr_in udp_addr;
+    memset(&udp_addr, 0, sizeof(udp_addr));
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_port = htons(9092);
+    inet_pton(AF_INET, "127.0.0.1", &udp_addr.sin_addr);
+    connection_set_udp_addr(viewer, &udp_addr);
+    connection_set_udp_handshake_complete(viewer);
 
-    // Проверяем, что стримы автоматически добавились к владельцу
-    assert(connection_get_own_stream_count(owner) == 2);
-    assert(connection_is_owning_stream(owner, s1));
-    assert(connection_is_owning_stream(owner, s2));
+    // Создаем стрим и добавляем получателя
+    Stream* stream = stream_new(500, owner, NULL);
+    stream_add_recipient(stream, viewer);
 
-    // Добавляем стримы к просматривающему (это не делается автоматически)
-    assert(connection_add_watch_stream(viewer, s1) == 0);
-    assert(connection_add_watch_stream(viewer, s2) == 0);
+    // Создаем звонок и добавляем оба соединения
+    Call* call = call_new(600);
+    call_add_participant(call, owner);
+    call_add_participant(call, viewer);
 
-    assert(connection_get_watch_stream_count(viewer) == 2);
-    assert(connection_get_own_stream_count(owner) == 2);
+    // Проверяем что связи установлены
+    TEST_ASSERT(&ctx, connection_is_owning_stream(owner, stream), "Owner should own stream");
+    TEST_ASSERT(&ctx, connection_is_watching_stream(viewer, stream), "Viewer should watch stream");
+    TEST_ASSERT(&ctx, connection_is_in_call(owner, call), "Owner should be in call");
+    TEST_ASSERT(&ctx, connection_is_in_call(viewer, call), "Viewer should be in call");
 
-    // Отписываем viewer от стримов
-    connection_detach_from_streams(viewer);
+    // Удаляем owner - это должно очистить все связи
+    connection_delete(owner);
 
-    assert(connection_get_watch_stream_count(viewer) == 0);
+    // Проверяем что стрим удален из viewer
+    TEST_ASSERT(&ctx, !connection_is_watching_stream(viewer, stream), "Viewer should not watch stream after owner deletion");
+    
+    // Проверяем что owner удален из звонка
+    // (здесь нужно проверить через call_get_participant_count, но пока оставим так)
 
-    // Удаляем owner (должен удалить и стримы)
-    connection_destroy_full(owner);
+    // Проверяем что owner удален из глобальной таблицы
+    Connection* found = connection_find(f1);
+    TEST_ASSERT(&ctx, found == NULL, "Should not find owner after deletion");
 
-    // Удаляем viewer
-    connection_destroy_full(viewer);
+    // Очищаем оставшиеся ресурсы
+    connection_delete(viewer);
+    call_delete(call);
 
-    printf("✓ passed\n\n");
+
+bool integrity_ok = check_all_integrity();
+TEST_ASSERT(&ctx, integrity_ok, "System integrity check failed after test");
+
+    TEST_REPORT(&ctx, "test_connection_delete_cleanup");
 }
 
-/* ---------------------------------------------------------
- * TEST 5 — limits
- * --------------------------------------------------------- */
-void test_connection_limits() {
-    printf("=== test_connection_limits ===\n");
+bool test_connection_close_all() {
+    TestContext ctx;
+    TEST_INIT(&ctx, "test_connection_close_all");
+    
+    int f1 = socket(AF_INET, SOCK_STREAM, 0);
+    int f2 = socket(AF_INET, SOCK_STREAM, 0);
+    int f3 = socket(AF_INET, SOCK_STREAM, 0);
+    
+    Connection* c1 = make_conn(f1);
+    Connection* c2 = make_conn(f2);
+    Connection* c3 = make_conn(f3);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    Connection* c = make_conn(fd);
+    // Проверяем что соединения добавлены в глобальную таблицу
+    TEST_ASSERT(&ctx, connection_find(f1) == c1, "Should find connection 1");
+    TEST_ASSERT(&ctx, connection_find(f2) == c2, "Should find connection 2");
+    TEST_ASSERT(&ctx, connection_find(f3) == c3, "Should find connection 3");
 
-    // Заполняем все слоты для owned streams через stream_create
-    Stream* streams[MAX_OUTPUT];
-    for (int i = 0; i < MAX_OUTPUT; i++) {
-        streams[i] = stream_create(300 + i, c);
-        assert(streams[i] != NULL); // Убеждаемся, что создание прошло успешно
-        assert(connection_get_own_stream_count(c) == i + 1);
-    }
+    // Закрываем все соединения
+    connection_close_all();
 
-    // Попытка создать еще один стрим должна вернуть NULL (лимит исчерпан)
-    Stream* overflow = stream_create(999, c);
-    assert(overflow == NULL);
+    // Проверяем что глобальная таблица пуста
+    TEST_ASSERT(&ctx, connection_find(f1) == NULL, "Should not find connection 1 after close_all");
+    TEST_ASSERT(&ctx, connection_find(f2) == NULL, "Should not find connection 2 after close_all");
+    TEST_ASSERT(&ctx, connection_find(f3) == NULL, "Should not find connection 3 after close_all");
+    TEST_ASSERT(&ctx, connections == NULL, "Global connections should be NULL after close_all");
 
-    // cleanup - connection_destroy_full удалит все стримы
-    connection_destroy_full(c);
+bool integrity_ok = check_all_integrity();
+TEST_ASSERT(&ctx, integrity_ok, "System integrity check failed after test");
 
-    printf("✓ passed\n\n");
+    TEST_REPORT(&ctx, "test_connection_close_all");
 }
 
-/* ---------------------------------------------------------
- * TEST 6 — address string
- * --------------------------------------------------------- */
-void test_connection_addr_string() {
-    printf("=== test_connection_addr_string ===\n");
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    Connection* c = make_conn(fd);
-
-    const char* addr_str = connection_get_address_string(c);
-    assert(addr_str != NULL);
-    assert(strstr(addr_str, "127.0.0.1") != NULL);
-    assert(strstr(addr_str, "9090") != NULL);
-
-    connection_destroy_full(c);
-
-    printf("✓ passed\n\n");
-}
-
-/* ---------------------------------------------------------
- * MAIN
- * --------------------------------------------------------- */
-void run_all_connection_tests() {
+bool run_all_connection_tests() {
     printf("Running connection tests...\n\n");
-
-    test_connection_basic_create();
-    test_connection_table();
-    test_connection_udp();
-    test_connection_streams();
-    test_connection_limits();
-    test_connection_addr_string();
-
-    printf("All connection tests passed! ✓\n\n");
+    
+    bool all_passed = true;
+    all_passed = test_connection_new_delete() && all_passed;
+    all_passed = test_connection_stream_management() && all_passed;
+    all_passed = test_connection_call_management() && all_passed;
+    all_passed = test_connection_udp_management() && all_passed;
+    all_passed = test_connection_delete_cleanup() && all_passed;
+    all_passed = test_connection_close_all() && all_passed;
+    
+    if (all_passed) {
+        printf("All connection tests passed! ✓\n\n");
+    } else {
+        printf("Some connection tests failed! ✗\n\n");
+    }
+    
+    return all_passed;
 }

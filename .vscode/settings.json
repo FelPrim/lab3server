@@ -4,6 +4,13 @@
         "cstdint": "c",
         "string.h": "c",
         "unistd.h": "c",
-        "time.h": "c"
+        "time.h": "c",
+        "protocol.h": "c",
+        "connection.h": "c",
+        "stdlib.h": "c",
+        "test_common.h": "c",
+        "errno.h": "c",
+        "buffer.h": "c",
+        "integrity_check.h": "c"
     }
 }

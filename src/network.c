@@ -9,10 +9,10 @@
 #include <sys/epoll.h>
 #include <netinet/tcp.h>
 
-// Добавить в начало network.c
-extern int g_udp_fd = -1;
-extern int g_tcp_fd = -1; 
-extern int g_epoll_fd = -1;
+// Изменяем на объявления (extern) вместо определений
+extern int g_udp_fd;
+extern int g_tcp_fd; 
+extern int g_epoll_fd;
 
 // Определяем SOCK_NONBLOCK если не определен (для совместимости)
 #ifndef SOCK_NONBLOCK
@@ -207,7 +207,7 @@ int udp_send_packet(int udp_fd, const void* data, size_t len,
     // Используем MSG_DONTWAIT для неблокирующей отправки
     ssize_t sent = sendto(udp_fd, data, len, MSG_DONTWAIT,
                          (const struct sockaddr*)dest_addr, sizeof(*dest_addr));
-    printf("sent: %llu; udp_fd=%d, len=%llu, dest_addr={family=%d, addr=%s, port=%d}\n", 
+    printf("sent: %ld; udp_fd=%d, len=%zu, dest_addr={family=%d, addr=%s, port=%d}\n", 
        sent, udp_fd, len, 
        dest_addr->sin_family,
        inet_ntoa(((struct sockaddr_in*)dest_addr)->sin_addr),
