@@ -10,6 +10,7 @@
 #include "call.h"
 #include "network.h"
 #include "id_utils.h"
+#include <unistd.h>
 
 // Глобальные переменные
 extern int g_udp_fd;
@@ -244,6 +245,34 @@ void handle_stream_join(Connection* conn, const StreamIDPayload* payload) {
     // Если это первый зритель, уведомляем владельца
     if (stream_get_recipient_count(stream) == 1) {
         send_stream_start(stream);
+    }
+
+    if (connection_has_udp(conn) && connection_is_udp_handshake_complete(conn)) {
+        UDPStreamPacket test_packet;
+        memset(&test_packet, 0, sizeof(test_packet));
+        test_packet.call_id = htonl(0);  // public stream
+        test_packet.stream_id = htonl(stream_id);
+        test_packet.packet_number = htonl(9999);  // специальный номер для тестового пакета
+        const char* test_data = "TEST UDP PACKET AFTER JOIN";
+        memcpy(test_packet.data, test_data, strlen(test_data));
+        
+        // Отправляем на сохраненный адрес клиента
+        udp_send_packet(g_udp_fd, &test_packet, sizeof(test_packet), &conn->udp_addr);
+        
+        printf("🔥 Sent test UDP packet to connection %d after joining stream %u\n", 
+            conn->fd, stream_id);
+        printf("🔥 Destination: %s:%d\n", 
+            inet_ntoa(conn->udp_addr.sin_addr), ntohs(conn->udp_addr.sin_port));
+    }
+
+
+    printf("🔍 After stream_join - recipient count: %d\n", stream_get_recipient_count(stream));
+    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
+        if (stream->recipients[i]) {
+            Connection* r = stream->recipients[i];
+            printf("  Recipient %d: fd=%d, has_udp=%d, udp_complete=%d\n", 
+                i, r->fd, connection_has_udp(r), connection_is_udp_handshake_complete(r));
+        }
     }
 }
 
@@ -502,18 +531,42 @@ void handle_udp_handshake(const UDPHandshakePacket* packet, const struct sockadd
     send_server_handshake_end(conn);
     
     printf("UDP handshake completed for connection %u\n", connection_id);
+
+    // TODO убрать после того, как станет понятно, почему сервер видит разные порты для одного клиента
+    UDPStreamPacket test_packet;
+    memset(&test_packet, 0, sizeof(test_packet));
+    test_packet.call_id = htonl(0);  // public stream
+    test_packet.stream_id = htonl(12345);  // ваш streamId
+    test_packet.packet_number = htonl(1);
+    const char* test_data = "TEST UDP PACKET FROM SERVER";
+    memcpy(test_packet.data, test_data, strlen(test_data));
+
+    udp_send_packet(g_udp_fd, &test_packet, sizeof(test_packet), &conn->udp_addr);
+    printf("🔥 Sent test UDP packet to connection %u\n", connection_id);
+    
+    printf("UDP handshake completed for connection %u\n", connection_id);
 }
 
 void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockaddr_in* src_addr) {
+
+    
     uint32_t call_id = ntohl(packet->call_id);
     uint32_t stream_id = ntohl(packet->stream_id);
-    
+
+    printf("🔍 UDP stream packet received - call_id: %u, stream_id: %u, from: %s:%d\n",
+        call_id, stream_id, 
+        inet_ntoa(src_addr->sin_addr), ntohs(src_addr->sin_port));
+
     // Находим стрим
     Stream* stream = stream_find_by_id(stream_id);
     if (!stream) {
         printf("UDP stream packet: stream %u not found\n", stream_id);
         return;
     }
+
+    printf("🔍 Stream found - owner: %d, recipient count: %d\n", 
+        stream->owner ? stream->owner->fd : -1,
+        stream_get_recipient_count(stream));
     
     // Для приватных стримов проверяем call_id
     if (stream->call && stream->call->call_id != call_id) {
@@ -521,12 +574,25 @@ void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockad
         return;
     }
     
-    // Пересылаем пакет всем получателям
-    broadcast_to_stream_recipients(stream, 0, packet, sizeof(UDPStreamPacket), NULL);
+    // Пересылаем пакет всем получателям по UDP
+    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
+        Connection* recipient = stream->recipients[i];
+        if (recipient && recipient != stream->owner) {
+
+            printf("🔍 Checking recipient %d - has_udp: %d, handshake_complete: %d\n",
+                recipient->fd, 
+                connection_has_udp(recipient),
+                connection_is_udp_handshake_complete(recipient));
+            // Проверяем, что для получателя завершен UDP handshake
+            if (connection_has_udp(recipient) && connection_is_udp_handshake_complete(recipient)) {
+                // Отправляем исходный UDP пакет (не меняя его состав)
+                udp_send_packet(g_udp_fd, packet, sizeof(UDPStreamPacket), &recipient->udp_addr);
+            }
+        }
+    }
     
     (void)src_addr; // Помечаем параметр как использованный
 }
-
 // ==================== ФУНКЦИИ ОТПРАВКИ СЕРВЕРА ====================
 
 void send_server_handshake_start(Connection* conn) {

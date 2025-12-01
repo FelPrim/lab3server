@@ -3,6 +3,137 @@
 #include "stream.h" 
 #include "call.h"
 #include <stdio.h>
+#include <arpa/inet.h>
+
+static void print_connection_details(const Connection* conn) {
+    if (!conn) return;
+    
+    printf("Connection %d:\n", conn->fd);
+    printf("  TCP Address: %s\n", connection_get_address_string(conn));
+    
+    // UDP address
+    char udp_str[INET_ADDRSTRLEN + 10];
+    if (connection_has_udp(conn)) {
+        inet_ntop(AF_INET, &conn->udp_addr.sin_addr, udp_str, INET_ADDRSTRLEN);
+        int udp_port = ntohs(conn->udp_addr.sin_port);
+        printf("  UDP Address: %s:%d\n", udp_str, udp_port);
+    } else {
+        printf("  UDP Address: Not set\n");
+    }
+    
+    printf("  UDP Handshake Complete: %s\n", 
+           connection_is_udp_handshake_complete(conn) ? "true" : "false");
+    
+    // Watch streams
+    printf("  Watch Streams: [");
+    bool first = true;
+    for (int i = 0; i < MAX_INPUT; i++) {
+        if (conn->watch_streams[i]) {
+            if (!first) printf(", ");
+            printf("%u", conn->watch_streams[i]->stream_id);
+            first = false;
+        }
+    }
+    if (first) printf("None");
+    printf("]\n");
+    
+    // Own streams
+    printf("  Own Streams: [");
+    first = true;
+    for (int i = 0; i < MAX_OUTPUT; i++) {
+        if (conn->own_streams[i]) {
+            if (!first) printf(", ");
+            printf("%u", conn->own_streams[i]->stream_id);
+            first = false;
+        }
+    }
+    if (first) printf("None");
+    printf("]\n");
+    
+    // Calls
+    printf("  Calls: [");
+    first = true;
+    for (int i = 0; i < MAX_CONNECTION_CALLS; i++) {
+        if (conn->calls[i]) {
+            if (!first) printf(", ");
+            printf("%u", conn->calls[i]->call_id);
+            first = false;
+        }
+    }
+    if (first) printf("None");
+    printf("]\n");
+    
+    // Buffer info
+    printf("  Read Buffer: pos=%zu, expected_size=%zu\n", 
+           conn->read_buffer.position, conn->read_buffer.expected_size);
+    printf("  Write Buffer: pos=%zu, expected_size=%zu\n", 
+           conn->write_buffer.position, conn->write_buffer.expected_size);
+    printf("\n");
+}
+
+static void print_stream_details(const Stream* stream) {
+    if (!stream) return;
+    
+    printf("Stream %u:\n", stream->stream_id);
+    printf("  Owner: %d\n", stream->owner ? stream->owner->fd : -1);
+    printf("  Call: %u\n", stream->call ? stream->call->call_id : 0);
+    printf("  Is Private: %s\n", stream_is_private(stream) ? "true" : "false");
+    
+    // Recipients
+    printf("  Recipients: [");
+    bool first = true;
+    for (int i = 0; i < STREAM_MAX_RECIPIENTS; i++) {
+        if (stream->recipients[i]) {
+            if (!first) printf(", ");
+            printf("%d", stream->recipients[i]->fd);
+            first = false;
+        }
+    }
+    if (first) printf("None");
+    printf("]\n");
+    
+    printf("  Recipient Count: %d\n", stream_get_recipient_count(stream));
+    printf("  Can Add Recipient: %s\n", stream_can_add_recipient(stream) ? "true" : "false");
+    printf("\n");
+}
+
+static void print_call_details(const Call* call) {
+    if (!call) return;
+    
+    printf("Call %u:\n", call->call_id);
+    
+    // Participants
+    printf("  Participants: [");
+    bool first = true;
+    for (int i = 0; i < MAX_CALL_PARTICIPANTS; i++) {
+        if (call->participants[i]) {
+            if (!first) printf(", ");
+            printf("%d", call->participants[i]->fd);
+            first = false;
+        }
+    }
+    if (first) printf("None");
+    printf("]\n");
+    
+    // Streams
+    printf("  Streams: [");
+    first = true;
+    for (int i = 0; i < MAX_CALL_STREAMS; i++) {
+        if (call->streams[i]) {
+            if (!first) printf(", ");
+            printf("%u", call->streams[i]->stream_id);
+            first = false;
+        }
+    }
+    if (first) printf("None");
+    printf("]\n");
+    
+    printf("  Participant Count: %d\n", call_get_participant_count(call));
+    printf("  Stream Count: %d\n", call_get_stream_count(call));
+    printf("  Can Add Participant: %s\n", call_can_add_participant(call) ? "true" : "false");
+    printf("  Can Add Stream: %s\n", call_can_add_stream(call) ? "true" : "false");
+    printf("\n");
+}
 
 inline static bool check_all_integrity(void) {
     printf("=== Starting system integrity check ===\n");
@@ -11,10 +142,65 @@ inline static bool check_all_integrity(void) {
     int stream_count = 0;
     int call_count = 0;
 
-    // 1. Проходим по всем звонкам
+    // Собираем IDs для summary
+    printf("=== Current Network State ===\n");
+    
+    // Connections
+    Connection *conn, *conn_tmp;
+    printf("Connections: [");
+    HASH_ITER(hh, connections, conn, conn_tmp) {
+        connection_count++;
+        if (connection_count > 1) printf(", ");
+        printf("%d", conn->fd);
+    }
+    if (connection_count == 0) printf("None");
+    printf("]\n");
+    
+    // Streams
+    Stream *stream, *stream_tmp;
+    printf("Streams: [");
+    HASH_ITER(hh, streams, stream, stream_tmp) {
+        stream_count++;
+        if (stream_count > 1) printf(", ");
+        printf("%u", stream->stream_id);
+    }
+    if (stream_count == 0) printf("None");
+    printf("]\n");
+    
+    // Calls
     Call *call, *call_tmp;
+    printf("Calls: [");
     HASH_ITER(hh, calls, call, call_tmp) {
         call_count++;
+        if (call_count > 1) printf(", ");
+        printf("%u", call->call_id);
+    }
+    if (call_count == 0) printf("None");
+    printf("]\n\n");
+    
+    // Подробная информация о каждом объекте
+    printf("=== Detailed Object Information ===\n");
+    
+    // Connections details
+    HASH_ITER(hh, connections, conn, conn_tmp) {
+        print_connection_details(conn);
+    }
+    
+    // Streams details
+    HASH_ITER(hh, streams, stream, stream_tmp) {
+        print_stream_details(stream);
+    }
+    
+    // Calls details
+    HASH_ITER(hh, calls, call, call_tmp) {
+        print_call_details(call);
+    }
+
+    // Проверки целостности
+    printf("=== Starting Integrity Verification ===\n");
+
+    // 1. Проверяем звонки
+    HASH_ITER(hh, calls, call, call_tmp) {
         printf("Checking call %u...\n", call->call_id);
         
         // Проверяем участников звонка
@@ -48,10 +234,8 @@ inline static bool check_all_integrity(void) {
         }
     }
 
-    // 2. Проходим по всем стримам
-    Stream *stream, *stream_tmp;
+    // 2. Проверяем стримы
     HASH_ITER(hh, streams, stream, stream_tmp) {
-        stream_count++;
         printf("Checking stream %u...\n", stream->stream_id);
         
         // Проверяем владельца
@@ -97,10 +281,8 @@ inline static bool check_all_integrity(void) {
         }
     }
 
-    // 3. Проходим по всем соединениям
-    Connection *conn, *conn_tmp;
+    // 3. Проверяем соединения
     HASH_ITER(hh, connections, conn, conn_tmp) {
-        connection_count++;
         printf("Checking connection %d...\n", conn->fd);
         
         // Проверяем owned streams
@@ -150,7 +332,7 @@ inline static bool check_all_integrity(void) {
     }
 
     printf("=== Integrity check summary ===\n");
-    printf("Connections: %d, Streams: %d, Calls: %d\n", connection_count, stream_count, call_count);
+    printf("Objects: Connections=%d, Streams=%d, Calls=%d\n", connection_count, stream_count, call_count);
     printf("=== Integrity check %s ===\n", all_ok ? "PASSED" : "FAILED");
     
     return all_ok;
