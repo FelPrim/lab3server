@@ -590,10 +590,10 @@ void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockad
         Connection* recipient = stream->recipients[i];
         if (recipient && recipient != stream->owner) {
 
-            printf("🔍 Checking recipient %d - has_udp: %d, handshake_complete: %d\n",
-                recipient->fd, 
-                connection_has_udp(recipient),
-                connection_is_udp_handshake_complete(recipient));
+          //  printf("🔍 Checking recipient %d - has_udp: %d, handshake_complete: %d\n",
+          //      recipient->fd, 
+          //      connection_has_udp(recipient),
+          //      connection_is_udp_handshake_complete(recipient));
             // Проверяем, что для получателя завершен UDP handshake
             if (connection_has_udp(recipient) && connection_is_udp_handshake_complete(recipient)) {
                 // Отправляем исходный UDP пакет (не меняя его состав)
