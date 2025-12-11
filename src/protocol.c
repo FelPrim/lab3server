@@ -553,9 +553,20 @@ void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockad
     uint32_t call_id = ntohl(packet->call_id);
     uint32_t stream_id = ntohl(packet->stream_id);
 
-    printf("🔍 UDP stream packet received - call_id: %u, stream_id: %u, from: %s:%d\n",
-        call_id, stream_id, 
-        inet_ntoa(src_addr->sin_addr), ntohs(src_addr->sin_port));
+    //printf("sent: %ld; udp_fd=%d, len=%zu, dest_addr={family=%d, addr=%s, port=%d}\n", 
+    //   sent, udp_fd, len, 
+    //   dest_addr->sin_family,
+    //   inet_ntoa(((struct sockaddr_in*)dest_addr)->sin_addr),
+    //   ntohs(((struct sockaddr_in*)dest_addr)->sin_port));
+
+    uint32_t number = ntohl(packet->packet_number);
+    printf("packet received - call_id: %u, stream_id: %u, packet_number: %u",
+        call_id, stream_id
+        //,  inet_ntoa(src_addr->sin_addr)
+      //  , ntohs(src_addr->sin_port)
+      , number
+    );
+
 
     // Находим стрим
     Stream* stream = stream_find_by_id(stream_id);
@@ -564,9 +575,9 @@ void handle_udp_stream_packet(const UDPStreamPacket* packet, const struct sockad
         return;
     }
 
-    printf("🔍 Stream found - owner: %d, recipient count: %d\n", 
-        stream->owner ? stream->owner->fd : -1,
-        stream_get_recipient_count(stream));
+   // printf("🔍 Stream found - owner: %d, recipient count: %d\n", 
+   //     stream->owner ? stream->owner->fd : -1,
+   //     stream_get_recipient_count(stream));
     
     // Для приватных стримов проверяем call_id
     if (stream->call && stream->call->call_id != call_id) {

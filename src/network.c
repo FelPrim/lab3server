@@ -203,15 +203,14 @@ int accept_connection(int server_fd, struct sockaddr_in* client_addr) {
 int udp_send_packet(int udp_fd, const void* data, size_t len,
                    const struct sockaddr_in* dest_addr) {
     
-    printf("@@@");
     // Используем MSG_DONTWAIT для неблокирующей отправки
     ssize_t sent = sendto(udp_fd, data, len, MSG_DONTWAIT,
                          (const struct sockaddr*)dest_addr, sizeof(*dest_addr));
-    printf("sent: %ld; udp_fd=%d, len=%zu, dest_addr={family=%d, addr=%s, port=%d}\n", 
-       sent, udp_fd, len, 
-       dest_addr->sin_family,
-       inet_ntoa(((struct sockaddr_in*)dest_addr)->sin_addr),
-       ntohs(((struct sockaddr_in*)dest_addr)->sin_port));
+    //printf("sent: %ld; udp_fd=%d, len=%zu, dest_addr={family=%d, addr=%s, port=%d}\n", 
+    //   sent, udp_fd, len, 
+    //   dest_addr->sin_family,
+    //   inet_ntoa(((struct sockaddr_in*)dest_addr)->sin_addr),
+    //   ntohs(((struct sockaddr_in*)dest_addr)->sin_port));
     if (sent == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Буфер отправки заполнен - нужно повторить позже
