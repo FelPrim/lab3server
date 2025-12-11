@@ -1,6 +1,6 @@
 # Компилятор и флаги
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c23 -g -O0 -I.
+CFLAGS = -Wall -Wextra -std=c23 -O3 -march=native -flto -I.
 LDFLAGS = -lpthread
 
 # Папки
